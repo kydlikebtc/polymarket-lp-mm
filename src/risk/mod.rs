@@ -24,6 +24,7 @@ impl std::fmt::Display for RiskLevel {
 }
 
 /// Reason for risk level change
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum RiskTrigger {
     IirExceeded { market_id: String, iir: Decimal },
@@ -303,6 +304,7 @@ impl RiskController {
     }
 
     /// Manual recovery from L3 (must be called by human operator)
+    #[allow(dead_code)]
     pub fn manual_recover(&mut self) {
         if self.level == RiskLevel::L3Emergency {
             self.transition_to(RiskLevel::L1Normal, RiskTrigger::ManualRecovery);

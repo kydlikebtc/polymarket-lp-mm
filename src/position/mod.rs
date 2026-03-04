@@ -9,6 +9,7 @@ use crate::config::PositionConfig;
 use crate::data::state::{PositionRecord, SharedState};
 
 /// Action determined by position manager
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum PositionAction {
     /// No action needed
@@ -46,6 +47,7 @@ impl PositionManager {
     }
 
     /// Record that a merge was executed for a market
+    #[allow(dead_code)]
     pub fn record_merge(&mut self, market_id: &str) {
         self.last_merge_times.insert(market_id.to_string(), Utc::now());
     }

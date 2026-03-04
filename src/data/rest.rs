@@ -10,8 +10,10 @@ use uuid::Uuid;
 
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{Credentials, Normal};
-use polymarket_client_sdk::clob::types::request::CancelMarketOrderRequest;
-use polymarket_client_sdk::clob::types::{OrderType, Side};
+use polymarket_client_sdk::clob::types::request::{
+    BalanceAllowanceRequest, CancelMarketOrderRequest, OrdersRequest,
+};
+use polymarket_client_sdk::clob::types::{AssetType, OrderType, Side};
 use polymarket_client_sdk::POLYGON;
 
 use crate::config::AppConfig;
@@ -19,6 +21,7 @@ use crate::data::state::OrderSide;
 use crate::pricing::QuoteOrder;
 
 /// Authenticated CLOB client wrapping `polymarket-client-sdk`.
+#[allow(dead_code)]
 pub struct ClobClient {
     /// Authenticated SDK client (Normal L2 auth)
     sdk: polymarket_client_sdk::clob::Client<Authenticated<Normal>>,
@@ -33,14 +36,16 @@ pub struct ClobClient {
 }
 
 impl ClobClient {
-    /// Check API connectivity
-    pub async fn check_balance(&self) -> Result<()> {
-        info!("CLOB API authentication verified");
-        Ok(())
+    /// Verify API connectivity by fetching USDC balance
+    pub async fn check_connection(&self) -> Result<Decimal> {
+        let balance = self.fetch_collateral_balance().await?;
+        info!("CLOB API authenticated, USDC balance: ${balance}");
+        Ok(balance)
     }
 
     /// Submit a single limit order via the SDK.
     /// Returns the order_id assigned by the exchange.
+    #[allow(dead_code)]
     pub async fn post_limit_order(
         &self,
         token_id: &str,
@@ -144,6 +149,7 @@ impl ClobClient {
     }
 
     /// Cancel a single order by ID
+    #[allow(dead_code)]
     pub async fn cancel_order(&self, order_id: &str) -> Result<()> {
         let resp = self.sdk
             .cancel_order(order_id)
@@ -161,6 +167,58 @@ impl ClobClient {
             .context("Failed to cancel all orders")?;
         info!("All orders cancelled via API: canceled={}", resp.canceled.len());
         Ok(())
+    }
+
+    /// Fetch all open orders (paginated). Returns a flat list.
+    pub async fn fetch_open_orders(&self) -> Result<Vec<polymarket_client_sdk::clob::types::response::OpenOrderResponse>> {
+        let mut all_orders = Vec::new();
+        let mut cursor = None;
+        let request = OrdersRequest::builder().build();
+
+        loop {
+            let page = self.sdk.orders(&request, cursor).await
+                .context("Failed to fetch open orders")?;
+
+            all_orders.extend(page.data);
+
+            if page.next_cursor.is_empty() || page.next_cursor == "LTE=" {
+                break;
+            }
+            cursor = Some(page.next_cursor);
+        }
+
+        info!("Fetched {} open orders from API", all_orders.len());
+        Ok(all_orders)
+    }
+
+    /// Get USDC balance for collateral
+    pub async fn fetch_collateral_balance(&self) -> Result<Decimal> {
+        let req = BalanceAllowanceRequest::builder()
+            .asset_type(AssetType::Collateral)
+            .build();
+
+        let resp = self.sdk.balance_allowance(req).await
+            .context("Failed to fetch collateral balance")?;
+
+        info!("USDC balance: {}", resp.balance);
+        Ok(resp.balance)
+    }
+
+    /// Get conditional token balance for a specific token_id
+    pub async fn fetch_token_balance(&self, token_id: &str) -> Result<Decimal> {
+        let asset_id = U256::from_str(token_id)
+            .context("Invalid token_id")?;
+
+        let req = BalanceAllowanceRequest::builder()
+            .asset_type(AssetType::Conditional)
+            .token_id(asset_id)
+            .build();
+
+        let resp = self.sdk.balance_allowance(req).await
+            .context("Failed to fetch token balance")?;
+
+        debug!("Token balance for {token_id}: {}", resp.balance);
+        Ok(resp.balance)
     }
 
     /// Cancel all orders for a specific market/token
@@ -231,6 +289,6 @@ pub async fn create_clob_client(config: &AppConfig) -> Result<ClobClient> {
         base_url: config.api.clob_base_url.clone(),
     };
 
-    client.check_balance().await?;
+    client.check_connection().await?;
     Ok(client)
 }

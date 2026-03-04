@@ -7,6 +7,7 @@ use crate::data::state::{OrderSide, SharedState};
 use crate::risk::RiskLevel;
 
 /// A single order to be placed
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct QuoteOrder {
     pub market_id: String,

@@ -1,6 +1,5 @@
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use std::str::FromStr;
 
 // We test the pricing logic by importing from the crate
 use polymarket_mm::config::*;

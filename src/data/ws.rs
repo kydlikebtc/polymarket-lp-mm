@@ -72,13 +72,19 @@ async fn run_market_ws_inner(
                     *last_msg = Utc::now();
                 }
 
-                let asset_id = book.asset_id.to_string();
+                let token_id = book.asset_id.to_string();
+
+                // Resolve token_id → market_id for state lookup
+                let Some(market_id) = state.resolve_market_id(&token_id) else {
+                    debug!("Unknown token_id from WS: {token_id}, skipping");
+                    continue;
+                };
 
                 // Extract best bid/ask from the book
                 let best_bid = book.bids.first().map(|b| b.price);
                 let best_ask = book.asks.first().map(|a| a.price);
 
-                if let Some(mut ms) = state.market_states.get_mut(&asset_id) {
+                if let Some(mut ms) = state.market_states.get_mut(&market_id) {
                     if let (Some(bid), Some(ask)) = (best_bid, best_ask) {
                         ms.best_bid = Some(bid);
                         ms.best_ask = Some(ask);
@@ -86,11 +92,11 @@ async fn run_market_ws_inner(
                         ms.spread = ask - bid;
                         ms.updated_at = Utc::now();
 
-                        state.record_price(&asset_id, ms.midpoint);
+                        state.record_price(&market_id, ms.midpoint);
 
                         debug!(
-                            "Book update: asset={}, mid={}, spread={}, bids={}, asks={}",
-                            asset_id, ms.midpoint, ms.spread,
+                            "Book update: market={}, token={}, mid={}, spread={}, bids={}, asks={}",
+                            market_id, token_id, ms.midpoint, ms.spread,
                             book.bids.len(), book.asks.len()
                         );
                     }
@@ -177,12 +183,56 @@ async fn run_user_ws_inner(
                 }
             }
             Ok(WsMessage::Trade(trade)) => {
-                debug!(
-                    "User WS trade: id={}, market={}, side={:?}, price={}, size={}",
+                info!(
+                    "FILL: id={}, market={}, side={:?}, price={}, size={}",
                     trade.id, trade.market, trade.side, trade.price, trade.size
                 );
-                // Trade events can be used for PnL tracking
-                // For MVP, just log them
+
+                // Map SDK side to our OrderSide
+                let our_side = match trade.side {
+                    polymarket_client_sdk::clob::types::Side::Buy => {
+                        crate::data::state::OrderSide::Buy
+                    }
+                    polymarket_client_sdk::clob::types::Side::Sell => {
+                        crate::data::state::OrderSide::Sell
+                    }
+                    _ => crate::data::state::OrderSide::Buy,
+                };
+
+                // Record PnL
+                {
+                    let mut pnl = state.daily_pnl.write().await;
+                    pnl.record_fill(our_side, trade.price, trade.size);
+                    debug!(
+                        "PnL update: realized={}, fills={}",
+                        pnl.realized_pnl, pnl.fill_count
+                    );
+                }
+
+                // Update position: BUY adds shares, SELL removes shares
+                let market_id = trade.market.to_string();
+                // Try to resolve via token_to_market; trade.market is condition_id
+                let resolved = state.resolve_market_id(&trade.asset_id.to_string())
+                    .unwrap_or(market_id);
+
+                if let Some(mut pos) = state.positions.get_mut(&resolved) {
+                    match our_side {
+                        crate::data::state::OrderSide::Buy => {
+                            pos.yes_shares += trade.size;
+                        }
+                        crate::data::state::OrderSide::Sell => {
+                            pos.yes_shares = (pos.yes_shares - trade.size).max(Decimal::ZERO);
+                        }
+                    }
+                    pos.updated_at = Utc::now();
+                }
+
+                // Push PnL to risk controller
+                {
+                    let pnl = state.daily_pnl.read().await;
+                    let mut rc = risk_controller.lock().await;
+                    rc.update_pnl(pnl.realized_pnl);
+                }
             }
             Ok(_other) => {
                 // Other message types (heartbeat, etc.)

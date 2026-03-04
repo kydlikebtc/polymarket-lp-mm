@@ -16,6 +16,7 @@ pub struct AppConfig {
     pub api: ApiConfig,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct MarketConfig {
     pub market_id: String,
@@ -36,6 +37,7 @@ pub struct CapitalConfig {
     pub max_per_market_fraction: Decimal,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct PricingConfig {
     /// Ladder layers configuration
@@ -77,6 +79,7 @@ pub struct PositionConfig {
     pub merge_cooldown_secs: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct RiskConfig {
     // L2 thresholds
@@ -112,6 +115,7 @@ pub struct ExecutionConfig {
     pub cancel_confirm_timeout_ms: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiConfig {
     pub clob_base_url: String,

@@ -14,8 +14,54 @@ pub struct SharedState {
     pub positions: Arc<DashMap<String, PositionRecord>>,
     pub ws_last_message: Arc<RwLock<DateTime<Utc>>>,
     pub price_history: Arc<DashMap<String, Vec<PricePoint>>>,
+    /// Mapping: token_id → market_id (WS uses token_id, rest of system uses market_id)
+    pub token_to_market: Arc<DashMap<String, String>>,
+    /// Daily realized PnL tracker (reset at UTC midnight)
+    pub daily_pnl: Arc<RwLock<PnlTracker>>,
+    /// Cached market settlement times (market_id → end_date)
+    pub settlement_times: Arc<DashMap<String, DateTime<Utc>>>,
 }
 
+/// Tracks realized PnL from trade events
+#[derive(Debug, Clone)]
+pub struct PnlTracker {
+    /// Cumulative realized PnL for the current day (USDC)
+    pub realized_pnl: Decimal,
+    /// Day this tracker is for
+    pub date: chrono::NaiveDate,
+    /// Number of fills tracked
+    pub fill_count: u64,
+}
+
+impl PnlTracker {
+    pub fn new() -> Self {
+        Self {
+            realized_pnl: Decimal::ZERO,
+            date: Utc::now().date_naive(),
+            fill_count: 0,
+        }
+    }
+
+    /// Record a fill. For maker: BUY → spent USDC (negative), SELL → received USDC (positive)
+    pub fn record_fill(&mut self, side: OrderSide, price: Decimal, size: Decimal) {
+        let today = Utc::now().date_naive();
+        if today != self.date {
+            // Day rolled over — reset
+            self.realized_pnl = Decimal::ZERO;
+            self.date = today;
+            self.fill_count = 0;
+        }
+
+        let cash_flow = price * size;
+        match side {
+            OrderSide::Buy => self.realized_pnl -= cash_flow,  // spent USDC
+            OrderSide::Sell => self.realized_pnl += cash_flow, // received USDC
+        }
+        self.fill_count += 1;
+    }
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct MarketState {
     pub market_id: String,
@@ -27,6 +73,7 @@ pub struct MarketState {
     pub updated_at: DateTime<Utc>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct OrderRecord {
     pub order_id: String,
@@ -54,6 +101,7 @@ impl std::fmt::Display for OrderSide {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderStatus {
     Pending,
@@ -101,8 +149,9 @@ impl SharedState {
     pub fn new(config: &AppConfig) -> Self {
         let market_states = Arc::new(DashMap::new());
         let positions = Arc::new(DashMap::new());
+        let token_to_market = Arc::new(DashMap::new());
 
-        // Pre-populate markets
+        // Pre-populate markets and build token→market mapping
         for market in &config.markets {
             market_states.insert(
                 market.market_id.clone(),
@@ -127,6 +176,7 @@ impl SharedState {
                     updated_at: Utc::now(),
                 },
             );
+            token_to_market.insert(market.token_id.clone(), market.market_id.clone());
         }
 
         Self {
@@ -135,7 +185,15 @@ impl SharedState {
             positions,
             ws_last_message: Arc::new(RwLock::new(Utc::now())),
             price_history: Arc::new(DashMap::new()),
+            token_to_market,
+            daily_pnl: Arc::new(RwLock::new(PnlTracker::new())),
+            settlement_times: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Resolve a token_id to the corresponding market_id
+    pub fn resolve_market_id(&self, token_id: &str) -> Option<String> {
+        self.token_to_market.get(token_id).map(|v| v.clone())
     }
 
     /// Get 5-minute price change for a market

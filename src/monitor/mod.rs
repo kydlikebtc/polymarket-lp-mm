@@ -10,6 +10,7 @@ use tracing::{error, info, warn};
 
 use crate::config::AppConfig;
 use crate::data::SharedState;
+use crate::data::gamma::{self, GammaClient};
 use crate::data::ws;
 use crate::execution::OrderExecutor;
 use crate::position::{PositionAction, PositionManager};
@@ -38,6 +39,77 @@ pub async fn run_orchestrator(
     let per_market_capital = config.per_market_capital();
     info!("Per-market capital allocation: ${per_market_capital:.2}");
 
+    // Load initial positions: fetch YES token balances for each market
+    for market in &config.markets {
+        match executor.client().fetch_token_balance(&market.token_id).await {
+            Ok(balance) => {
+                if balance > Decimal::ZERO {
+                    if let Some(mut pos) = state.positions.get_mut(&market.market_id) {
+                        pos.yes_shares = balance;
+                        pos.updated_at = Utc::now();
+                        info!(
+                            "Loaded initial position: market={}, YES shares={}",
+                            market.name, balance
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to load position for market={}: {e:#}, starting with zero",
+                    market.name
+                );
+            }
+        }
+    }
+
+    // Load existing open orders into state
+    match executor.client().fetch_open_orders().await {
+        Ok(orders) => {
+            for order in &orders {
+                let market_id = state
+                    .resolve_market_id(&order.asset_id.to_string())
+                    .unwrap_or_default();
+                let side = match order.side {
+                    polymarket_client_sdk::clob::types::Side::Buy => {
+                        crate::data::state::OrderSide::Buy
+                    }
+                    polymarket_client_sdk::clob::types::Side::Sell => {
+                        crate::data::state::OrderSide::Sell
+                    }
+                    _ => crate::data::state::OrderSide::Buy,
+                };
+                state.my_orders.insert(
+                    order.id.clone(),
+                    crate::data::state::OrderRecord {
+                        order_id: order.id.clone(),
+                        market_id,
+                        price: order.price,
+                        size: order.original_size - order.size_matched,
+                        side,
+                        status: crate::data::state::OrderStatus::Live,
+                        created_at: order.created_at,
+                        updated_at: Utc::now(),
+                    },
+                );
+            }
+            info!("Loaded {} existing open orders from API", orders.len());
+        }
+        Err(e) => {
+            warn!("Failed to load open orders: {e:#}, starting fresh");
+        }
+    }
+
+    // Fetch settlement times from Gamma API
+    let gamma_client = GammaClient::new(&config.api.gamma_base_url)?;
+    let market_ids: Vec<String> = config.markets.iter().map(|m| m.market_id.clone()).collect();
+    let settlement_map = gamma_client.fetch_all_end_dates(&market_ids).await;
+    for (market_id, end_date) in &settlement_map {
+        state.settlement_times.insert(market_id.clone(), *end_date);
+        let hours = gamma::hours_until(end_date).unwrap_or(0.0);
+        info!("Market {market_id}: settles at {end_date}, {hours:.1}h remaining");
+    }
+
     // Spawn market data WebSocket
     let token_ids: Vec<String> = config.markets.iter().map(|m| m.token_id.clone()).collect();
     let ws_state = state.clone();
@@ -64,6 +136,8 @@ pub async fn run_orchestrator(
     let mut position_tick = interval(Duration::from_secs(60));
     // Metrics logging interval
     let mut metrics_tick = interval(Duration::from_secs(60));
+    // Settlement time refresh interval (every 30 minutes)
+    let mut settlement_tick = interval(Duration::from_secs(1800));
 
     // Track last quote midpoints per market
     let mut last_quote_midpoints: std::collections::HashMap<String, Decimal> =
@@ -150,7 +224,18 @@ pub async fn run_orchestrator(
             // Metrics logging (every 60 seconds)
             _ = metrics_tick.tick() => {
                 let rc = risk_controller.lock().await;
-                log_metrics(&state, &config, &rc);
+                log_metrics(&state, &config, &rc).await;
+            }
+
+            // Refresh settlement times from Gamma API (every 30 minutes)
+            _ = settlement_tick.tick() => {
+                let updated = gamma_client.fetch_all_end_dates(&market_ids).await;
+                for (market_id, end_date) in &updated {
+                    state.settlement_times.insert(market_id.clone(), *end_date);
+                }
+                if !updated.is_empty() {
+                    info!("Refreshed settlement times for {} markets", updated.len());
+                }
             }
 
             // Graceful shutdown
@@ -197,7 +282,14 @@ async fn evaluate_risk(
 
     let ws_disconnect = state.ws_disconnect_secs().await;
 
+    // Sync daily PnL to risk controller before evaluation
+    let daily_pnl = {
+        let pnl = state.daily_pnl.read().await;
+        pnl.realized_pnl
+    };
+
     let mut rc = controller.lock().await;
+    rc.update_pnl(daily_pnl);
     rc.evaluate(&market_iirs, &price_changes, ws_disconnect)
 }
 
@@ -256,7 +348,11 @@ async fn run_market_strategy(
 
     // Compute factors
     let vaf = pricing_engine.compute_vaf(state, market_id);
-    let tf = pricing_engine.compute_tf(None); // TODO: pass actual settlement time
+    let hours_to_settlement = state
+        .settlement_times
+        .get(market_id)
+        .and_then(|end_date| gamma::hours_until(&end_date));
+    let tf = pricing_engine.compute_tf(hours_to_settlement);
 
     // TF = 0 means stop market making
     if tf.is_zero() {
@@ -345,7 +441,7 @@ async fn handle_position_action(
 }
 
 /// Log current metrics
-fn log_metrics(
+async fn log_metrics(
     state: &SharedState,
     config: &AppConfig,
     risk_controller: &RiskController,
@@ -356,11 +452,15 @@ fn log_metrics(
         .filter(|o| matches!(o.status, crate::data::state::OrderStatus::Live))
         .count();
 
+    let pnl = state.daily_pnl.read().await;
+
     info!(
-        "METRICS | Risk={} | ActiveOrders={} | Markets={}",
+        "METRICS | Risk={} | ActiveOrders={} | Markets={} | DailyPnL=${:.2} | Fills={}",
         risk_controller.level(),
         active_orders,
-        config.markets.len()
+        config.markets.len(),
+        pnl.realized_pnl,
+        pnl.fill_count,
     );
 
     for market in &config.markets {
@@ -370,9 +470,14 @@ fn log_metrics(
                 .get(&market.market_id)
                 .map(|p| p.iir())
                 .unwrap_or(Decimal::ZERO);
+            let shares = state
+                .positions
+                .get(&market.market_id)
+                .map(|p| (p.yes_shares, p.no_shares))
+                .unwrap_or((Decimal::ZERO, Decimal::ZERO));
             info!(
-                "  Market {} | mid={} | spread={} | IIR={iir}",
-                market.name, ms.midpoint, ms.spread
+                "  Market {} | mid={} | spread={} | IIR={iir} | YES={} NO={}",
+                market.name, ms.midpoint, ms.spread, shares.0, shares.1,
             );
         }
     }

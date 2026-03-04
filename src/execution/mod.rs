@@ -26,6 +26,11 @@ impl OrderExecutor {
         }
     }
 
+    /// Access the underlying CLOB client (for balance queries, etc.)
+    pub fn client(&self) -> &ClobClient {
+        &self.client
+    }
+
     /// Get API credentials (needed for WebSocket authentication)
     pub fn credentials(&self) -> &Credentials {
         &self.client.credentials
@@ -70,8 +75,21 @@ impl OrderExecutor {
             risk_controller.register_cancel(id.clone());
         }
 
-        // Call real API with retry
-        self.cancel_with_retry(market_id).await?;
+        // Look up token_id for per-market cancel (API uses token_id, not market_id)
+        let token_id = state
+            .token_to_market
+            .iter()
+            .find(|entry| entry.value() == market_id)
+            .map(|entry| entry.key().clone());
+
+        // Call real API with retry — use per-market cancel when possible
+        match &token_id {
+            Some(tid) => self.cancel_market_with_retry(tid).await?,
+            None => {
+                warn!("No token_id found for market={market_id}, using cancel_all as fallback");
+                self.client.cancel_all_orders().await?;
+            }
+        }
 
         // Wait for confirmation via WebSocket (with timeout)
         let timeout = Duration::from_millis(self.config.cancel_confirm_timeout_ms);
@@ -213,30 +231,30 @@ impl OrderExecutor {
         Ok(order_ids)
     }
 
-    /// Cancel market orders with exponential backoff retry.
-    async fn cancel_with_retry(&self, market_id: &str) -> Result<()> {
+    /// Cancel orders for a specific market token with exponential backoff retry.
+    async fn cancel_market_with_retry(&self, token_id: &str) -> Result<()> {
         let mut delay = Duration::from_millis(self.config.base_retry_delay_ms);
         let max_delay = Duration::from_millis(self.config.max_retry_delay_ms);
 
         for attempt in 0..self.config.max_retries {
-            let result = self.client.cancel_all_orders().await;
+            let result = self.client.cancel_market_orders(token_id).await;
 
             match result {
                 Ok(()) => {
-                    info!("Cancel request sent for market={market_id} (attempt {attempt})");
+                    info!("Market cancel sent for token={token_id} (attempt {attempt})");
                     return Ok(());
                 }
                 Err(e) => {
                     if attempt + 1 < self.config.max_retries {
                         warn!(
-                            "Cancel attempt {} failed for market={market_id}: {e:#}, retrying in {delay:?}",
+                            "Cancel attempt {} failed for token={token_id}: {e:#}, retrying in {delay:?}",
                             attempt + 1
                         );
                         sleep(delay).await;
                         delay = (delay * 2).min(max_delay);
                     } else {
                         return Err(e.context(format!(
-                            "Failed to cancel orders for market={market_id} after {} attempts",
+                            "Failed to cancel orders for token={token_id} after {} attempts",
                             self.config.max_retries
                         )));
                     }

@@ -1,3 +1,4 @@
+pub mod gamma;
 pub mod rest;
 pub mod state;
 pub mod ws;
