@@ -3,11 +3,15 @@ use chrono::Utc;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
 
+use alloy::primitives::Address;
+
 use crate::config::{AppConfig, ExecutionConfig};
 use crate::data::rest::ClobClient;
 use crate::data::state::{OrderRecord, OrderStatus, SharedState};
 use crate::pricing::QuoteOrder;
 use crate::risk::RiskController;
+
+use polymarket_client_sdk::auth::Credentials;
 
 pub struct OrderExecutor {
     client: ClobClient,
@@ -20,6 +24,16 @@ impl OrderExecutor {
             client,
             config: app_config.execution.clone(),
         }
+    }
+
+    /// Get API credentials (needed for WebSocket authentication)
+    pub fn credentials(&self) -> &Credentials {
+        &self.client.credentials
+    }
+
+    /// Get wallet address (needed for WebSocket authentication)
+    pub fn address(&self) -> Address {
+        self.client.address
     }
 
     /// Cancel all orders for a specific market.

@@ -1,12 +1,16 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use tokio::signal;
+use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 use tracing::{error, info, warn};
 
 use crate::config::AppConfig;
 use crate::data::SharedState;
+use crate::data::ws;
 use crate::execution::OrderExecutor;
 use crate::position::{PositionAction, PositionManager};
 use crate::pricing::PricingEngine;
@@ -16,27 +20,43 @@ use crate::risk::{RiskController, RiskLevel};
 ///
 /// Lifecycle:
 /// 1. Start WebSocket connections (market + user channels)
-/// 2. Pull initial positions from API
-/// 3. Enter main loop: check risk → compute prices → manage positions → execute
-/// 4. Handle graceful shutdown on Ctrl+C
+/// 2. Enter main loop: check risk → compute prices → manage positions → execute
+/// 3. Handle graceful shutdown on Ctrl+C
 pub async fn run_orchestrator(
     config: AppConfig,
     state: SharedState,
-    mut risk_controller: RiskController,
+    risk_controller: Arc<Mutex<RiskController>>,
     mut executor: OrderExecutor,
     pricing_engine: PricingEngine,
     position_manager: PositionManager,
 ) -> Result<()> {
-    risk_controller.set_total_capital(config.capital.total_capital);
+    {
+        let mut rc = risk_controller.lock().await;
+        rc.set_total_capital(config.capital.total_capital);
+    }
 
     let per_market_capital = config.per_market_capital();
     info!("Per-market capital allocation: ${per_market_capital:.2}");
 
-    // Spawn WebSocket tasks
-    // TODO: Uncomment when WebSocket implementation is ready
-    // let market_ids: Vec<String> = config.markets.iter().map(|m| m.market_id.clone()).collect();
-    // tokio::spawn(ws::run_market_ws(state.clone(), config.api.ws_market_url.clone(), market_ids));
-    // tokio::spawn(ws::run_user_ws(state.clone(), config.api.ws_user_url.clone(), api_key));
+    // Spawn market data WebSocket
+    let token_ids: Vec<String> = config.markets.iter().map(|m| m.token_id.clone()).collect();
+    let ws_state = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = ws::run_market_ws(ws_state, token_ids).await {
+            error!("Market WebSocket fatal error: {e:#}");
+        }
+    });
+
+    // Spawn user events WebSocket (for ghost fill detection)
+    let ws_state = state.clone();
+    let ws_credentials = executor.credentials().clone();
+    let ws_address = executor.address();
+    let ws_rc = Arc::clone(&risk_controller);
+    tokio::spawn(async move {
+        if let Err(e) = ws::run_user_ws(ws_state, ws_credentials, ws_address, ws_rc).await {
+            error!("User WebSocket fatal error: {e:#}");
+        }
+    });
 
     // Main strategy loop interval
     let mut strategy_tick = interval(Duration::from_secs(10));
@@ -58,7 +78,7 @@ pub async fn run_orchestrator(
             // Strategy tick (every 10 seconds)
             _ = strategy_tick.tick() => {
                 let risk_level = evaluate_risk(
-                    &mut risk_controller,
+                    &risk_controller,
                     &state,
                     &config,
                 ).await;
@@ -70,7 +90,8 @@ pub async fn run_orchestrator(
                             matches!(o.status, crate::data::state::OrderStatus::Live | crate::data::state::OrderStatus::Pending)
                         });
                         if has_active {
-                            if let Err(e) = executor.cancel_all_orders(&state, &mut risk_controller).await {
+                            let mut rc = risk_controller.lock().await;
+                            if let Err(e) = executor.cancel_all_orders(&state, &mut rc).await {
                                 error!("Failed to cancel all orders in L3: {e:#}");
                             }
                             warn!("L3 Emergency active. All orders cancelled. Waiting for manual recovery.");
@@ -86,7 +107,7 @@ pub async fn run_orchestrator(
                                 &state,
                                 &pricing_engine,
                                 &mut executor,
-                                &mut risk_controller,
+                                &risk_controller,
                                 risk_level,
                                 per_market_capital,
                                 &mut last_quote_midpoints,
@@ -115,7 +136,12 @@ pub async fn run_orchestrator(
                     if let Some(pos) = state.positions.get(&market.market_id) {
                         let actions = position_manager.evaluate(&pos);
                         for action in actions {
-                            handle_position_action(&action, &mut executor, &mut risk_controller, &state).await;
+                            handle_position_action(
+                                &action,
+                                &mut executor,
+                                &risk_controller,
+                                &state,
+                            ).await;
                         }
                     }
                 }
@@ -123,13 +149,15 @@ pub async fn run_orchestrator(
 
             // Metrics logging (every 60 seconds)
             _ = metrics_tick.tick() => {
-                log_metrics(&state, &config, &risk_controller);
+                let rc = risk_controller.lock().await;
+                log_metrics(&state, &config, &rc);
             }
 
             // Graceful shutdown
             _ = signal::ctrl_c() => {
                 warn!("Ctrl+C received, initiating graceful shutdown...");
-                if let Err(e) = executor.cancel_all_orders(&state, &mut risk_controller).await {
+                let mut rc = risk_controller.lock().await;
+                if let Err(e) = executor.cancel_all_orders(&state, &mut rc).await {
                     error!("Failed to cancel orders during shutdown: {e:#}");
                 }
                 info!("All orders cancelled. Shutdown complete.");
@@ -141,7 +169,7 @@ pub async fn run_orchestrator(
 
 /// Evaluate risk conditions and return current level
 async fn evaluate_risk(
-    controller: &mut RiskController,
+    controller: &Arc<Mutex<RiskController>>,
     state: &SharedState,
     config: &AppConfig,
 ) -> RiskLevel {
@@ -169,7 +197,8 @@ async fn evaluate_risk(
 
     let ws_disconnect = state.ws_disconnect_secs().await;
 
-    controller.evaluate(&market_iirs, &price_changes, ws_disconnect)
+    let mut rc = controller.lock().await;
+    rc.evaluate(&market_iirs, &price_changes, ws_disconnect)
 }
 
 /// Run strategy for a single market
@@ -179,7 +208,7 @@ async fn run_market_strategy(
     state: &SharedState,
     pricing_engine: &PricingEngine,
     executor: &mut OrderExecutor,
-    risk_controller: &mut RiskController,
+    risk_controller: &Arc<Mutex<RiskController>>,
     risk_level: RiskLevel,
     per_market_capital: Decimal,
     last_midpoints: &mut std::collections::HashMap<String, Decimal>,
@@ -232,12 +261,16 @@ async fn run_market_strategy(
     // TF = 0 means stop market making
     if tf.is_zero() {
         info!("Market {market_id} approaching settlement, stopping");
-        executor.cancel_market_orders(state, market_id, risk_controller).await?;
+        let mut rc = risk_controller.lock().await;
+        executor.cancel_market_orders(state, market_id, &mut rc).await?;
         return Ok(());
     }
 
     // Step 1: Cancel existing orders
-    executor.cancel_market_orders(state, market_id, risk_controller).await?;
+    {
+        let mut rc = risk_controller.lock().await;
+        executor.cancel_market_orders(state, market_id, &mut rc).await?;
+    }
 
     // Step 2: Generate new quotes
     let orders = pricing_engine.generate_quotes(
@@ -280,7 +313,7 @@ async fn run_market_strategy(
 async fn handle_position_action(
     action: &PositionAction,
     executor: &mut OrderExecutor,
-    risk_controller: &mut RiskController,
+    risk_controller: &Arc<Mutex<RiskController>>,
     state: &SharedState,
 ) {
     match action {
@@ -290,19 +323,19 @@ async fn handle_position_action(
         }
         PositionAction::EscalateL2 { market_id, iir } => {
             warn!("Position escalation to L2 from PositionManager: market={market_id}, IIR={iir}");
-            // Drive RiskController to L2 by feeding high IIR
+            let mut rc = risk_controller.lock().await;
             let iirs = vec![(market_id.clone(), *iir)];
             let prices = vec![(market_id.clone(), Decimal::ZERO)];
-            risk_controller.evaluate(&iirs, &prices, 0);
+            rc.evaluate(&iirs, &prices, 0);
         }
         PositionAction::EscalateL3 { market_id, iir } => {
             warn!("Position escalation to L3 from PositionManager: market={market_id}, IIR={iir}");
-            // Drive RiskController to L3 by feeding extreme IIR
+            let mut rc = risk_controller.lock().await;
             let iirs = vec![(market_id.clone(), *iir)];
             let prices = vec![(market_id.clone(), Decimal::ZERO)];
-            risk_controller.evaluate(&iirs, &prices, 0);
-            if risk_controller.level() == RiskLevel::L3Emergency {
-                if let Err(e) = executor.cancel_all_orders(state, risk_controller).await {
+            rc.evaluate(&iirs, &prices, 0);
+            if rc.level() == RiskLevel::L3Emergency {
+                if let Err(e) = executor.cancel_all_orders(state, &mut rc).await {
                     error!("Failed to cancel orders for L3 escalation: {e:#}");
                 }
             }

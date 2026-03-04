@@ -6,7 +6,10 @@ mod position;
 mod pricing;
 mod risk;
 
+use std::sync::Arc;
+
 use anyhow::Result;
+use tokio::sync::Mutex;
 use tracing::{error, info};
 
 #[tokio::main]
@@ -42,8 +45,8 @@ async fn main() -> Result<()> {
     let clob_client = data::rest::create_clob_client(&app_config).await?;
     info!("CLOB API connection validated");
 
-    // Step 4: Initialize risk controller (BEFORE strategy engine)
-    let risk_controller = risk::RiskController::new(&app_config.risk);
+    // Step 4: Initialize risk controller (shared via Arc<Mutex> for WS access)
+    let risk_controller = Arc::new(Mutex::new(risk::RiskController::new(&app_config.risk)));
     info!("Risk controller initialized at L1");
 
     // Step 5: Initialize execution layer
