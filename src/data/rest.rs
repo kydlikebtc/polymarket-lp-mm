@@ -266,6 +266,15 @@ pub async fn create_clob_client(config: &AppConfig) -> Result<ClobClient> {
     let private_key = std::env::var("POLYMARKET_PRIVATE_KEY")
         .context("POLYMARKET_PRIVATE_KEY not set")?;
 
+    // R5-8: Clear secrets from environment immediately after reading
+    // to reduce exposure window (visible in /proc/[pid]/environ, inherited by children)
+    // SAFETY: No other threads are running yet (called during single-threaded init).
+    unsafe {
+        std::env::remove_var("POLYMARKET_PRIVATE_KEY");
+        std::env::remove_var("POLYMARKET_API_SECRET");
+        std::env::remove_var("POLYMARKET_API_PASSPHRASE");
+    }
+
     info!("Initializing CLOB client at {}", config.api.clob_base_url);
 
     // Create signer from private key, set chain to Polygon mainnet

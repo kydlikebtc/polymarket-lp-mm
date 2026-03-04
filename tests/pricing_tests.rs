@@ -7,6 +7,26 @@ use polymarket_mm::data::state::OrderSide;
 use polymarket_mm::pricing::PricingEngine;
 use polymarket_mm::risk::RiskLevel;
 
+fn test_risk_config() -> RiskConfig {
+    RiskConfig {
+        l2_iir_threshold: dec!(0.5),
+        l2_price_change_5min: dec!(0.05),
+        l2_daily_loss_pct: dec!(0.03),
+        l2_ws_disconnect_secs: 30,
+        l3_iir_threshold: dec!(0.75),
+        l3_price_change_5min: dec!(0.10),
+        l3_daily_loss_pct: dec!(0.08),
+        l3_ghost_fill_count: 3,
+        l3_ghost_fill_window_secs: 1800,
+        l2_timeout_to_l3_secs: 7200,
+        l2_recovery_iir: dec!(0.4),
+        l2_recovery_price_change: dec!(0.03),
+        l2_recovery_hold_secs: 300,
+        l2_size_multiplier: dec!(0.5),
+        l2_spread_multiplier: dec!(1.5),
+    }
+}
+
 fn test_pricing_config() -> PricingConfig {
     PricingConfig {
         layers: vec![
@@ -45,7 +65,7 @@ fn test_market_config() -> MarketConfig {
 
 #[test]
 fn test_generate_quotes_l1_normal() {
-    let engine = PricingEngine::new(&test_pricing_config());
+    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
     let market = test_market_config();
 
     let orders = engine.generate_quotes(
@@ -96,7 +116,7 @@ fn test_generate_quotes_l1_normal() {
 
 #[test]
 fn test_no_orders_in_l3() {
-    let engine = PricingEngine::new(&test_pricing_config());
+    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
     let market = test_market_config();
 
     let orders = engine.generate_quotes(
@@ -115,7 +135,7 @@ fn test_no_orders_in_l3() {
 
 #[test]
 fn test_l2_reduces_size_and_widens_spread() {
-    let engine = PricingEngine::new(&test_pricing_config());
+    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
     let market = test_market_config();
 
     let l1_orders = engine.generate_quotes(
@@ -158,7 +178,7 @@ fn test_l2_reduces_size_and_widens_spread() {
 
 #[test]
 fn test_skewing_with_positive_iir() {
-    let engine = PricingEngine::new(&test_pricing_config());
+    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
     let market = test_market_config();
 
     // Balanced
@@ -192,7 +212,7 @@ fn test_skewing_with_positive_iir() {
 
 #[test]
 fn test_qscore_estimation() {
-    let engine = PricingEngine::new(&test_pricing_config());
+    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
     let market = test_market_config();
 
     let orders = engine.generate_quotes(
@@ -224,7 +244,7 @@ fn test_qscore_estimation() {
 
 #[test]
 fn test_time_factor() {
-    let engine = PricingEngine::new(&test_pricing_config());
+    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
 
     assert_eq!(engine.compute_tf(None), dec!(1.0));
     assert_eq!(engine.compute_tf(Some(48.0)), dec!(1.0));
@@ -236,7 +256,7 @@ fn test_time_factor() {
 
 #[test]
 fn test_prices_within_bounds() {
-    let engine = PricingEngine::new(&test_pricing_config());
+    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
     let market = test_market_config();
 
     // Test with extreme midpoints

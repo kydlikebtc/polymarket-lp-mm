@@ -216,6 +216,54 @@ impl AppConfig {
             "execution.max_retries must be > 0"
         );
 
+        // Pricing parameter bounds
+        let p = &self.pricing;
+        anyhow::ensure!(
+            p.baseline_volatility > Decimal::ZERO,
+            "baseline_volatility ({}) must be > 0",
+            p.baseline_volatility
+        );
+        anyhow::ensure!(
+            p.base_half_spread >= Decimal::ZERO,
+            "base_half_spread ({}) must be >= 0",
+            p.base_half_spread
+        );
+        anyhow::ensure!(
+            p.vaf_min > Decimal::ZERO && p.vaf_min < p.vaf_max,
+            "vaf_min ({}) must be > 0 and < vaf_max ({})",
+            p.vaf_min, p.vaf_max
+        );
+        anyhow::ensure!(
+            p.requote_threshold > Decimal::ZERO,
+            "requote_threshold ({}) must be > 0",
+            p.requote_threshold
+        );
+        anyhow::ensure!(
+            p.skew_factor >= Decimal::ZERO,
+            "skew_factor ({}) must be >= 0",
+            p.skew_factor
+        );
+
+        // Execution bounds
+        anyhow::ensure!(
+            self.execution.cancel_confirm_timeout_ms > 0,
+            "cancel_confirm_timeout_ms must be > 0"
+        );
+
+        // API URL scheme validation
+        anyhow::ensure!(
+            self.api.clob_base_url.starts_with("https://"),
+            "clob_base_url must use HTTPS"
+        );
+        anyhow::ensure!(
+            self.api.ws_market_url.starts_with("wss://"),
+            "ws_market_url must use WSS"
+        );
+        anyhow::ensure!(
+            self.api.ws_user_url.starts_with("wss://"),
+            "ws_user_url must use WSS"
+        );
+
         Ok(())
     }
 

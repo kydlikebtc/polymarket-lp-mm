@@ -3,6 +3,7 @@ use dashmap::DashMap;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 
 use crate::config::AppConfig;
@@ -24,6 +25,10 @@ pub struct SharedState {
     pub daily_pnl: Arc<RwLock<PnlTracker>>,
     /// Cached market settlement times (market_id → end_date)
     pub settlement_times: Arc<DashMap<String, DateTime<Utc>>>,
+    /// R5-12: Whether market data WS has ever received a message
+    pub market_ws_connected: Arc<AtomicBool>,
+    /// R5-12: Whether user events WS has ever received a message
+    pub user_ws_connected: Arc<AtomicBool>,
 }
 
 /// Per-market cost basis for weighted-average PnL tracking.
@@ -237,6 +242,8 @@ impl SharedState {
             token_to_market,
             daily_pnl: Arc::new(RwLock::new(PnlTracker::new())),
             settlement_times: Arc::new(DashMap::new()),
+            market_ws_connected: Arc::new(AtomicBool::new(false)),
+            user_ws_connected: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -245,7 +252,9 @@ impl SharedState {
         self.token_to_market.get(token_id).map(|v| v.clone())
     }
 
-    /// Get 5-minute price change for a market
+    /// Get 5-minute absolute price change for a market.
+    /// Uses absolute change (not relative) because binary market prices near 0 or 1
+    /// would cause tiny absolute movements to appear as huge relative changes.
     pub fn price_change_5min(&self, market_id: &str) -> Decimal {
         let Some(history) = self.price_history.get(market_id) else {
             return Decimal::ZERO;
@@ -266,15 +275,13 @@ impl SharedState {
         let first = recent.first().unwrap().price;
         let last = recent.last().unwrap().price;
 
-        if first.is_zero() {
-            Decimal::ZERO
-        } else {
-            (last - first) / first
-        }
+        (last - first).abs()
     }
 
     /// Record a new price point (single lock: entry → push + retain)
     pub fn record_price(&self, market_id: &str, price: Decimal) {
+        const MAX_PRICE_HISTORY: usize = 10_000;
+
         let mut entry = self.price_history
             .entry(market_id.to_string())
             .or_default();
@@ -287,6 +294,12 @@ impl SharedState {
         // Keep only last 60 minutes of history (matches compute_vaf 1-hour window)
         let cutoff = Utc::now() - chrono::Duration::minutes(60);
         entry.retain(|p| p.timestamp >= cutoff);
+
+        // Hard cap to prevent unbounded growth from high-frequency feeds
+        if entry.len() > MAX_PRICE_HISTORY {
+            let drain_count = entry.len() - MAX_PRICE_HISTORY;
+            entry.drain(..drain_count);
+        }
     }
 
     /// Seconds since last WebSocket message
@@ -307,5 +320,11 @@ impl SharedState {
         let market_secs = self.ws_disconnect_secs().await;
         let user_secs = self.user_ws_disconnect_secs().await;
         market_secs.max(user_secs)
+    }
+
+    /// R5-12: Check if both WebSocket connections have received at least one message
+    pub fn both_ws_connected(&self) -> bool {
+        self.market_ws_connected.load(Ordering::Relaxed)
+            && self.user_ws_connected.load(Ordering::Relaxed)
     }
 }

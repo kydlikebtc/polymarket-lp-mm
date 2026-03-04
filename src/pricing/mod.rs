@@ -2,7 +2,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tracing::debug;
 
-use crate::config::{MarketConfig, PricingConfig};
+use crate::config::{MarketConfig, PricingConfig, RiskConfig};
 use crate::data::state::{OrderSide, SharedState};
 use crate::risk::RiskLevel;
 
@@ -20,12 +20,18 @@ pub struct QuoteOrder {
 
 pub struct PricingEngine {
     config: PricingConfig,
+    /// L2 size multiplier from risk config (e.g., 0.5)
+    l2_size_multiplier: Decimal,
+    /// L2 spread multiplier from risk config (e.g., 1.5)
+    l2_spread_multiplier: Decimal,
 }
 
 impl PricingEngine {
-    pub fn new(config: &PricingConfig) -> Self {
+    pub fn new(config: &PricingConfig, risk_config: &RiskConfig) -> Self {
         Self {
             config: config.clone(),
+            l2_size_multiplier: risk_config.l2_size_multiplier,
+            l2_spread_multiplier: risk_config.l2_spread_multiplier,
         }
     }
 
@@ -45,10 +51,10 @@ impl PricingEngine {
     ) -> Vec<QuoteOrder> {
         let mut orders = Vec::new();
 
-        // Risk-level multipliers
+        // Risk-level multipliers (R5-3: use config values instead of hardcoded)
         let (size_mult, spread_mult) = match risk_level {
             RiskLevel::L1Normal => (dec!(1.0), dec!(1.0)),
-            RiskLevel::L2Warning => (dec!(0.5), dec!(1.5)),
+            RiskLevel::L2Warning => (self.l2_size_multiplier, self.l2_spread_multiplier),
             RiskLevel::L3Emergency => return orders, // No orders in L3
         };
 
@@ -59,16 +65,29 @@ impl PricingEngine {
         let mut remaining_ask_shares = available_yes_shares;
 
         for (i, layer) in self.config.layers.iter().enumerate() {
-            let effective_distance = layer.distance * vaf * tf * spread_mult;
-            let layer_capital = per_market_capital * layer.capital_fraction * size_mult;
+            // R5-2: Include base_half_spread so there's always a minimum distance from midpoint
+            // R5-15: Enforce minimum 0.1 cent effective distance to prevent zero-spread quoting
+            let effective_distance = ((self.config.base_half_spread + layer.distance) * vaf * tf * spread_mult)
+                .max(dec!(0.005));
+            // R5-7: Divide by 2 because capital is split between bid and ask sides.
+            // Without this, 3 layers at 100% fraction would use 200% of per_market_capital.
+            let layer_capital = (per_market_capital / Decimal::TWO) * layer.capital_fraction * size_mult;
 
             // Ensure orders stay within [0.01, 0.99]
             let bid_price = (midpoint - effective_distance + skew)
                 .max(dec!(0.01))
-                .min(dec!(0.99));
+                .min(dec!(0.99))
+                .round_dp(2);
             let ask_price = (midpoint + effective_distance + skew)
                 .max(dec!(0.01))
-                .min(dec!(0.99));
+                .min(dec!(0.99))
+                .round_dp(2);
+
+            // R5-1: Skip this layer if bid/ask crossed or equal after clamping
+            if bid_price >= ask_price {
+                debug!("Skipping layer {i}: bid={bid_price} >= ask={ask_price} (crossed)");
+                continue;
+            }
 
             // Size = capital / price (how many shares we can afford)
             let bid_size = if bid_price > Decimal::ZERO {
@@ -85,23 +104,24 @@ impl PricingEngine {
             // Clamp ask_size to available YES shares to prevent selling more than we own
             let ask_size = raw_ask_size.min(remaining_ask_shares).max(Decimal::ZERO);
 
-            if bid_size > Decimal::ZERO {
+            // R5-5: Enforce min_size for Q-Score qualification
+            if bid_size >= market.min_size {
                 orders.push(QuoteOrder {
                     market_id: market.market_id.clone(),
                     token_id: market.token_id.clone(),
                     side: OrderSide::Buy,
-                    price: bid_price.round_dp(2),
+                    price: bid_price,
                     size: bid_size,
                     layer: i,
                 });
             }
 
-            if ask_size > Decimal::ZERO {
+            if ask_size >= market.min_size {
                 orders.push(QuoteOrder {
                     market_id: market.market_id.clone(),
                     token_id: market.token_id.clone(),
                     side: OrderSide::Sell,
-                    price: ask_price.round_dp(2),
+                    price: ask_price,
                     size: ask_size,
                     layer: i,
                 });

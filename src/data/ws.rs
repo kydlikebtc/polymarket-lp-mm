@@ -85,6 +85,8 @@ async fn run_market_ws_inner(
         match result {
             Ok(book) => {
                 received_any = true;
+                // R5-12: Mark market WS as having received data
+                state.market_ws_connected.store(true, std::sync::atomic::Ordering::Relaxed);
 
                 // Update heartbeat timestamp
                 {
@@ -105,21 +107,33 @@ async fn run_market_ws_inner(
                 let best_ask = book.asks.first().map(|a| a.price);
 
                 if let Some(mut ms) = state.market_states.get_mut(&market_id) {
-                    if let (Some(bid), Some(ask)) = (best_bid, best_ask) {
-                        ms.best_bid = Some(bid);
-                        ms.best_ask = Some(ask);
-                        ms.midpoint = (bid + ask) / Decimal::TWO;
-                        ms.spread = ask - bid;
-                        ms.updated_at = Utc::now();
+                    // Update whichever side(s) are available
+                    if let Some(bid) = best_bid { ms.best_bid = Some(bid); }
+                    if let Some(ask) = best_ask { ms.best_ask = Some(ask); }
 
-                        state.record_price(&market_id, ms.midpoint);
-
-                        debug!(
-                            "Book update: market={}, token={}, mid={}, spread={}, bids={}, asks={}",
-                            market_id, token_id, ms.midpoint, ms.spread,
-                            book.bids.len(), book.asks.len()
-                        );
+                    match (ms.best_bid, ms.best_ask) {
+                        (Some(bid), Some(ask)) => {
+                            ms.midpoint = (bid + ask) / Decimal::TWO;
+                            ms.spread = ask - bid;
+                        }
+                        (Some(bid), None) => {
+                            ms.midpoint = bid; // Best approximation with single side
+                            ms.spread = Decimal::ZERO;
+                        }
+                        (None, Some(ask)) => {
+                            ms.midpoint = ask;
+                            ms.spread = Decimal::ZERO;
+                        }
+                        (None, None) => {} // Empty book, keep previous values
                     }
+                    ms.updated_at = Utc::now();
+                    state.record_price(&market_id, ms.midpoint);
+
+                    debug!(
+                        "Book update: market={}, token={}, mid={}, spread={}, bids={}, asks={}",
+                        market_id, token_id, ms.midpoint, ms.spread,
+                        book.bids.len(), book.asks.len()
+                    );
                 }
             }
             Err(e) => {
@@ -188,6 +202,8 @@ async fn run_user_ws_inner(
 
     while let Some(event) = stream.next().await {
         received_any = true;
+        // R5-12: Mark user WS as having received data
+        state.user_ws_connected.store(true, std::sync::atomic::Ordering::Relaxed);
 
         // Update user WS heartbeat for disconnect detection
         {
@@ -202,6 +218,20 @@ async fn run_user_ws_inner(
 
                 // Update order state
                 if let Some(mut our_order) = state.my_orders.get_mut(&order_id) {
+                    // R5-19: Cross-validate that WS event matches our local record.
+                    // Reject events where asset_id resolves to a different market_id.
+                    let ws_market = state.resolve_market_id(&order.asset_id.to_string());
+                    if let Some(ref ws_mid) = ws_market {
+                        if *ws_mid != our_order.market_id {
+                            warn!(
+                                "WS order event market mismatch: order={order_id}, \
+                                 local={}, ws={ws_mid}. Ignoring.",
+                                our_order.market_id
+                            );
+                            continue;
+                        }
+                    }
+
                     // Determine new status: prefer SDK `status` field, fall back to `msg_type`
                     let new_status = if let Some(ref sdk_status) = order.status {
                         match sdk_status {

@@ -29,7 +29,7 @@ pub async fn run_orchestrator(
     risk_controller: Arc<Mutex<RiskController>>,
     mut executor: OrderExecutor,
     pricing_engine: PricingEngine,
-    position_manager: PositionManager,
+    mut position_manager: PositionManager,
 ) -> Result<()> {
     {
         let mut rc = risk_controller.lock().await;
@@ -169,13 +169,10 @@ pub async fn run_orchestrator(
         tokio::select! {
             // Strategy tick (every 10 seconds)
             _ = strategy_tick.tick() => {
-                // Skip strategy until both WS connections have received at least one message.
+                // R5-12: Skip strategy until both WS connections have received at least one message.
                 // Before WS connects, midpoints are default (0.50) and may be wildly wrong.
-                let market_ws_gap = state.ws_disconnect_secs().await;
-                let user_ws_gap = state.user_ws_disconnect_secs().await;
-                let startup_elapsed = strategy_tick.period().as_secs(); // first tick is immediate
-                if market_ws_gap > startup_elapsed + 5 || user_ws_gap > startup_elapsed + 5 {
-                    debug!("Waiting for WS connections (market_gap={market_ws_gap}s, user_gap={user_ws_gap}s)");
+                if !state.both_ws_connected() {
+                    debug!("Waiting for WS connections before starting strategy");
                     continue;
                 }
 
@@ -242,6 +239,7 @@ pub async fn run_orchestrator(
                                 &mut executor,
                                 &risk_controller,
                                 &state,
+                                &mut position_manager,
                             ).await;
                         }
                     }
@@ -384,10 +382,13 @@ async fn run_market_strategy(
 
     // Compute factors
     let vaf = pricing_engine.compute_vaf(state, market_id);
+    // R5-17: Use .map() + unwrap_or(0.0) instead of .and_then() so that
+    // a known but past settlement time yields Some(0.0) → TF=0.0 (stop trading),
+    // while truly unknown settlement (no entry) yields None → TF=1.0 (normal).
     let hours_to_settlement = state
         .settlement_times
         .get(market_id)
-        .and_then(|end_date| gamma::hours_until(&end_date));
+        .map(|end_date| gamma::hours_until(&end_date).unwrap_or(0.0));
     let tf = pricing_engine.compute_tf(hours_to_settlement);
 
     // TF = 0 means stop market making
@@ -475,11 +476,14 @@ async fn handle_position_action(
     executor: &mut OrderExecutor,
     risk_controller: &Arc<Mutex<RiskController>>,
     state: &SharedState,
+    position_manager: &mut PositionManager,
 ) {
     match action {
         PositionAction::TriggerMerge { market_id, amount } => {
             info!("Would merge {amount} pairs in market={market_id}");
             // TODO: Call CTF contract mergePositions via alloy
+            // R5-18: Record merge timestamp for cooldown enforcement
+            position_manager.record_merge(market_id);
         }
         PositionAction::EscalateL2 { market_id, iir } => {
             warn!("Position escalation to L2 from PositionManager: market={market_id}, IIR={iir}");

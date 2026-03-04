@@ -70,13 +70,13 @@ merge_cooldown_secs = 300           # 5 minutes between merges
 [risk]
 # L2 triggers
 l2_iir_threshold = "0.5"
-l2_price_change_5min = "0.10"       # 10%
+l2_price_change_5min = "0.05"       # 5 cents absolute change
 l2_daily_loss_pct = "0.03"          # 3%
 l2_ws_disconnect_secs = 30
 
 # L3 triggers
 l3_iir_threshold = "0.75"
-l3_price_change_5min = "0.20"       # 20%
+l3_price_change_5min = "0.10"       # 10 cents absolute change
 l3_daily_loss_pct = "0.08"          # 8%
 l3_ghost_fill_count = 3
 l3_ghost_fill_window_secs = 1800    # 30 minutes
@@ -84,7 +84,7 @@ l2_timeout_to_l3_secs = 7200        # 2 hours
 
 # L2 recovery
 l2_recovery_iir = "0.4"
-l2_recovery_price_change = "0.05"   # 5%
+l2_recovery_price_change = "0.03"   # 3 cents absolute change
 l2_recovery_hold_secs = 300         # 5 minutes
 
 # L2 adjustments

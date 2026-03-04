@@ -98,6 +98,12 @@ impl RiskController {
 
     /// Register a cancel request we initiated
     pub fn register_cancel(&mut self, order_id: String) {
+        const MAX_CANCEL_ENTRIES: usize = 5000;
+        if self.our_cancel_requests.len() >= MAX_CANCEL_ENTRIES {
+            // Emergency prune: remove oldest half
+            let cutoff = Utc::now() - chrono::Duration::minutes(2);
+            self.our_cancel_requests.retain(|_, ts| *ts >= cutoff);
+        }
         self.our_cancel_requests.insert(order_id, Utc::now());
     }
 

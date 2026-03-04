@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
     info!("Order executor initialized");
 
     // Step 6: Initialize pricing engine
-    let pricing_engine = pricing::PricingEngine::new(&app_config.pricing);
+    let pricing_engine = pricing::PricingEngine::new(&app_config.pricing, &app_config.risk);
     info!("Pricing engine initialized");
 
     // Step 7: Initialize position manager
