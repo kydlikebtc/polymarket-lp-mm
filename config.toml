@@ -1,0 +1,117 @@
+# Polymarket MM Bot Configuration
+# Copy this file and adjust values for your setup.
+
+# ═══════════════════════════════════════════════════════
+# Markets to trade (MVP: 1-3 markets)
+# ═══════════════════════════════════════════════════════
+
+[[markets]]
+market_id = "0x_YOUR_MARKET_ID_1"
+token_id = "0x_YOUR_TOKEN_ID_1"
+name = "Example Market 1"
+max_incentive_spread = "0.03"   # 3 cents
+min_size = "5.0"                # $5 minimum order
+
+# [[markets]]
+# market_id = "0x_YOUR_MARKET_ID_2"
+# token_id = "0x_YOUR_TOKEN_ID_2"
+# name = "Example Market 2"
+# max_incentive_spread = "0.03"
+# min_size = "5.0"
+
+# ═══════════════════════════════════════════════════════
+# Capital allocation
+# ═══════════════════════════════════════════════════════
+
+[capital]
+total_capital = "1000.0"            # Total USDC
+max_per_market_fraction = "0.50"    # Max 50% per market
+
+# ═══════════════════════════════════════════════════════
+# Pricing engine parameters
+# ═══════════════════════════════════════════════════════
+
+[pricing]
+base_half_spread = "0.005"          # 0.5 cents
+vaf_min = "0.8"
+vaf_max = "5.0"
+skew_factor = "0.02"                # IIR → price shift
+requote_threshold = "0.005"         # 0.5 cents triggers re-quote
+requote_interval_secs = 30          # Timer fallback
+
+# Ladder layers: [distance, capital_fraction_per_side]
+[[pricing.layers]]
+distance = "0.005"                  # 0.5 cents (inner)
+capital_fraction = "0.20"           # 20% of per-market capital
+
+[[pricing.layers]]
+distance = "0.015"                  # 1.5 cents (middle)
+capital_fraction = "0.40"           # 40%
+
+[[pricing.layers]]
+distance = "0.025"                  # 2.5 cents (outer)
+capital_fraction = "0.40"           # 40%
+
+# ═══════════════════════════════════════════════════════
+# Position management
+# ═══════════════════════════════════════════════════════
+
+[position]
+iir_light_threshold = "0.3"
+iir_medium_threshold = "0.5"
+iir_extreme_threshold = "0.75"
+light_skew = "0.005"                # 0.5 cents
+medium_skew = "0.015"               # 1.5 cents
+min_merge_size = "100.0"            # $100 minimum
+merge_cooldown_secs = 300           # 5 minutes
+
+# ═══════════════════════════════════════════════════════
+# Risk control thresholds
+# ═══════════════════════════════════════════════════════
+
+[risk]
+# L2 triggers
+l2_iir_threshold = "0.5"
+l2_price_change_5min = "0.10"       # 10%
+l2_daily_loss_pct = "0.03"          # 3%
+l2_ws_disconnect_secs = 30
+
+# L3 triggers
+l3_iir_threshold = "0.75"
+l3_price_change_5min = "0.20"       # 20%
+l3_daily_loss_pct = "0.08"          # 8%
+l3_ghost_fill_count = 3
+l3_ghost_fill_window_secs = 1800    # 30 minutes
+l2_timeout_to_l3_secs = 7200        # 2 hours
+
+# L2 recovery
+l2_recovery_iir = "0.4"
+l2_recovery_price_change = "0.05"   # 5%
+l2_recovery_hold_secs = 300         # 5 minutes
+
+# L2 adjustments
+l2_size_multiplier = "0.5"
+l2_spread_multiplier = "1.5"
+
+# ═══════════════════════════════════════════════════════
+# Execution layer
+# ═══════════════════════════════════════════════════════
+
+[execution]
+batch_size = 15                     # Polymarket limit
+max_retries = 3
+base_retry_delay_ms = 1000
+max_retry_delay_ms = 60000
+cancel_confirm_timeout_ms = 5000
+
+# ═══════════════════════════════════════════════════════
+# API endpoints
+# ═══════════════════════════════════════════════════════
+
+[api]
+clob_base_url = "https://clob.polymarket.com"
+gamma_base_url = "https://gamma-api.polymarket.com"
+ws_market_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+ws_user_url = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
+polygon_rpc_url = "https://polygon-rpc.com"
+ctf_contract = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"

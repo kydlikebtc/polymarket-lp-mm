@@ -1,0 +1,50 @@
+[package]
+name = "polymarket-mm"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88.0"
+
+[dependencies]
+# Polymarket Official SDK
+polymarket-client-sdk = { version = "0.4.3", features = ["clob", "data", "gamma", "ctf", "ws", "heartbeats", "tracing"] }
+
+# Async runtime
+tokio = { version = "1.49", features = ["full"] }
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Config & environment
+dotenvy = "0.15"
+
+# HTTP
+reqwest = { version = "0.12", features = ["json"] }
+
+# Crypto
+alloy = { version = "1.6", features = ["signers", "signer-local", "provider-http", "contract"] }
+rust_decimal = "1.40"
+rust_decimal_macros = "1.40"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2"
+
+# Database
+rusqlite = { version = "0.33", features = ["bundled"] }
+
+# Utils
+uuid = { version = "1.21", features = ["v4"] }
+dashmap = "6.1"
+
+[dev-dependencies]
+tokio-test = "0.4"
