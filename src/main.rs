@@ -3,8 +3,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::Mutex;
 use tracing::{error, info};
-use zeroize::Zeroize;
-
 use polymarket_mm::{config, data, execution, monitor, position, pricing, risk};
 
 /// R6-1: Read and clear secrets while single-threaded, before tokio runtime starts.
@@ -57,10 +55,10 @@ fn main() -> Result<()> {
 }
 
 async fn async_main(
-    mut api_key: String,
-    mut api_secret: String,
-    mut api_passphrase: String,
-    mut private_key: String,
+    api_key: String,
+    api_secret: String,
+    api_passphrase: String,
+    private_key: String,
 ) -> Result<()> {
     // Step 1: Load configuration
     let app_config = config::AppConfig::load()?;
@@ -74,21 +72,16 @@ async fn async_main(
     let state = data::SharedState::new(&app_config);
     info!("Shared state initialized");
 
-    // Step 3: Validate API connection (secrets consumed here, then zeroized)
+    // Step 3: Validate API connection (secrets moved in, not cloned)
+    // R8-SEC1: Pass ownership instead of clone to avoid extra heap copies of secrets.
+    // create_clob_client zeroizes consumed strings internally after SDK consumption.
     let clob_client = data::rest::create_clob_client(
         &app_config,
-        api_key.clone(),
-        api_secret.clone(),
-        api_passphrase.clone(),
-        private_key.clone(),
+        api_key,
+        api_secret,
+        api_passphrase,
+        private_key,
     ).await?;
-
-    // R7-SEC2: Zeroize secret strings immediately after they're consumed by the SDK.
-    // Prevents secrets from lingering in freed heap memory (core dump / memory scan risk).
-    api_key.zeroize();
-    api_secret.zeroize();
-    api_passphrase.zeroize();
-    private_key.zeroize();
     info!("CLOB API connection validated, secrets zeroized");
 
     // Step 4: Initialize risk controller (shared via Arc<Mutex> for WS access)

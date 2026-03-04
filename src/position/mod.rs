@@ -48,7 +48,7 @@ impl PositionManager {
         match self.last_merge_times.get(market_id) {
             None => true,
             Some(last) => {
-                let elapsed = (Utc::now() - *last).num_seconds() as u64;
+                let elapsed = (Utc::now() - *last).num_seconds().max(0) as u64;
                 elapsed >= self.config.merge_cooldown_secs
             }
         }

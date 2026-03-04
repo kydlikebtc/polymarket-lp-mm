@@ -89,6 +89,14 @@ pub async fn run_market_strategy(
     let current_midpoint = ms.midpoint;
     let now = Utc::now();
 
+    // R8-BL7: If settlement time was never fetched from Gamma API, refuse to make market.
+    // Without settlement time, TF defaults to 1.0 (normal), which could continue trading
+    // on a settled or about-to-settle market, risking capital loss.
+    if !state.settlement_times.contains_key(market_id) {
+        warn!("Market {market_id}: no settlement time available, skipping (safety)");
+        return Ok(());
+    }
+
     // Check if we need to re-quote
     let should_requote = {
         let last_mid = last_midpoints.get(market_id).copied();
@@ -111,7 +119,15 @@ pub async fn run_market_strategy(
         return Ok(());
     }
 
-    // Get current IIR
+    // R8-BL14: Refresh position values with current midpoint before reading IIR.
+    // Without this, yes_value/no_value can be up to 60s stale (position_tick interval),
+    // causing IIR to lag behind market moves between position ticks.
+    if let Some(mut pos) = state.positions.get_mut(market_id) {
+        pos.yes_value = pos.yes_shares * current_midpoint;
+        pos.no_value = pos.no_shares * (Decimal::ONE - current_midpoint);
+    }
+
+    // Get current IIR (now using fresh values)
     let iir = state
         .positions
         .get(market_id)
@@ -133,6 +149,10 @@ pub async fn run_market_strategy(
     if tf.is_zero() {
         info!("Market {market_id} approaching settlement, stopping");
         executor.cancel_market_orders(state, market_id, risk_controller).await?;
+        // R8-BL5: Update tracking so subsequent ticks only re-check at requote_interval_secs,
+        // avoiding repeated cancel attempts every 10s strategy tick.
+        last_midpoints.insert(market_id.to_string(), current_midpoint);
+        last_times.insert(market_id.to_string(), now);
         return Ok(());
     }
 

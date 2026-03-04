@@ -152,6 +152,12 @@ impl AppConfig {
             self.capital.total_capital > Decimal::ZERO,
             "Total capital must be positive"
         );
+        // R8-SEC8: Reasonable upper bound to catch config typos or tampering
+        anyhow::ensure!(
+            self.capital.total_capital <= Decimal::from(1_000_000u64),
+            "total_capital ({}) exceeds safety limit of 1,000,000 USDC",
+            self.capital.total_capital
+        );
         anyhow::ensure!(
             self.execution.batch_size <= 15,
             "Polymarket batch limit is 15, got {}",
@@ -201,6 +207,22 @@ impl AppConfig {
             r.l2_ws_disconnect_secs > 0,
             "l2_ws_disconnect_secs must be > 0"
         );
+        // R8-BL: Recovery thresholds must be strictly below escalation thresholds
+        // to prevent L1↔L2 oscillation from rapid state transitions.
+        anyhow::ensure!(
+            r.l2_recovery_iir < r.l2_iir_threshold,
+            "l2_recovery_iir ({}) must be < l2_iir_threshold ({}) to prevent oscillation",
+            r.l2_recovery_iir, r.l2_iir_threshold
+        );
+        anyhow::ensure!(
+            r.l2_recovery_price_change < r.l2_price_change_5min,
+            "l2_recovery_price_change ({}) must be < l2_price_change_5min ({}) to prevent oscillation",
+            r.l2_recovery_price_change, r.l2_price_change_5min
+        );
+        anyhow::ensure!(
+            r.l3_ghost_fill_window_secs > 0,
+            "l3_ghost_fill_window_secs must be > 0"
+        );
         anyhow::ensure!(
             self.capital.max_per_market_fraction > Decimal::ZERO
                 && self.capital.max_per_market_fraction <= Decimal::ONE,
@@ -233,6 +255,10 @@ impl AppConfig {
             p.requote_threshold > Decimal::ZERO,
             "requote_threshold ({}) must be > 0",
             p.requote_threshold
+        );
+        anyhow::ensure!(
+            p.requote_interval_secs > 0,
+            "requote_interval_secs must be > 0"
         );
         anyhow::ensure!(
             p.skew_factor >= Decimal::ZERO,

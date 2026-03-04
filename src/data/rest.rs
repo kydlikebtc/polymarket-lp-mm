@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{Credentials, Normal};
@@ -257,10 +258,10 @@ impl ClobClient {
 /// before tokio runtime starts) instead of reading from env inside async context.
 pub async fn create_clob_client(
     config: &AppConfig,
-    api_key_str: String,
+    mut api_key_str: String,
     api_secret: String,
     api_passphrase: String,
-    private_key: String,
+    mut private_key: String,
 ) -> Result<ClobClient> {
     info!("Initializing CLOB client at {}", config.api.clob_base_url);
 
@@ -268,6 +269,8 @@ pub async fn create_clob_client(
     let signer: PrivateKeySigner = private_key.parse()
         .context("Invalid private key format")?;
     let signer = signer.with_chain_id(Some(POLYGON));
+    // R8-SEC1: Zeroize private_key immediately after parsing into signer
+    private_key.zeroize();
 
     let address = signer.address();
     debug!("Wallet address: {address}");
@@ -286,7 +289,12 @@ pub async fn create_clob_client(
     // Parse API key as UUID for credentials
     let api_key = Uuid::parse_str(&api_key_str)
         .context("POLYMARKET_API_KEY must be a valid UUID")?;
+    // R8-SEC1: Zeroize api_key_str after parsing into UUID
+    api_key_str.zeroize();
 
+    // Note: api_secret and api_passphrase are moved into Credentials which must
+    // persist for the process lifetime (needed for WS reconnection authentication).
+    // These cannot be zeroized here — documented as known limitation.
     let credentials = Credentials::new(api_key, api_secret, api_passphrase);
 
     let client = ClobClient {

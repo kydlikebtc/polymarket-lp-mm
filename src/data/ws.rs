@@ -110,8 +110,14 @@ async fn run_market_ws_inner(
                 };
 
                 // Extract best bid/ask from the book
-                let best_bid = book.bids.first().map(|b| b.price);
-                let best_ask = book.asks.first().map(|a| a.price);
+                // R8-SEC10: Validate price range for binary markets [0.001, 0.999].
+                // Rejects anomalous WS data that could poison midpoint/IIR calculations.
+                let best_bid = book.bids.first().map(|b| b.price).filter(|p| {
+                    *p > Decimal::ZERO && *p < Decimal::ONE
+                });
+                let best_ask = book.asks.first().map(|a| a.price).filter(|p| {
+                    *p > Decimal::ZERO && *p < Decimal::ONE
+                });
 
                 // R6-6: Read midpoint and drop DashMap RefMut before calling record_price,
                 // to avoid holding market_states entry across another DashMap access.
@@ -290,6 +296,22 @@ async fn run_user_ws_inner(
                     "FILL: id={}, market={}, side={:?}, price={}, size={}",
                     trade.id, trade.market, trade.side, trade.price, trade.size
                 );
+
+                // R8-SEC10: Validate trade price and size before processing
+                if trade.price <= Decimal::ZERO || trade.price >= Decimal::ONE {
+                    warn!(
+                        "Trade {} has out-of-range price={}, skipping",
+                        trade.id, trade.price
+                    );
+                    continue;
+                }
+                if trade.size <= Decimal::ZERO || trade.size > Decimal::from(1_000_000u64) {
+                    warn!(
+                        "Trade {} has out-of-range size={}, skipping",
+                        trade.id, trade.size
+                    );
+                    continue;
+                }
 
                 // Map SDK side to our OrderSide
                 let our_side = match trade.side {

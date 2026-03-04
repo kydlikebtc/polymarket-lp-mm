@@ -311,7 +311,6 @@ impl SharedState {
         }
     }
 
-    /// Seconds since last WebSocket message
     /// Seconds since last market data WS message
     pub async fn ws_disconnect_secs(&self) -> u64 {
         let last = *self.ws_last_message.read().await;

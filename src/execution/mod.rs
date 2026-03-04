@@ -209,6 +209,15 @@ impl OrderExecutor {
         state: &SharedState,
         orders: Vec<QuoteOrder>,
     ) -> Result<Vec<String>> {
+        // R8-SEC15: Pre-flight check — refuse to submit if total order value is anomalous.
+        // This is a defense-in-depth guard against pricing engine bugs or poisoned inputs.
+        let total_value: rust_decimal::Decimal = orders.iter().map(|o| o.price * o.size).sum();
+        if total_value > rust_decimal::Decimal::from(1_000_000u64) {
+            anyhow::bail!(
+                "Order batch total value ({total_value}) exceeds safety limit, refusing submission"
+            );
+        }
+
         let mut submitted_ids = Vec::new();
 
         for batch in orders.chunks(self.config.batch_size) {
