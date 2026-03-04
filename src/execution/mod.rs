@@ -56,11 +56,10 @@ impl OrderExecutor {
             risk_controller.register_cancel(id.clone());
         }
 
-        // TODO: Replace with actual API call
-        // POST /cancel-market-orders { market: market_id }
+        // Call real API with retry
         self.cancel_with_retry(market_id).await?;
 
-        // Wait for confirmation (with timeout)
+        // Wait for confirmation via WebSocket (with timeout)
         let timeout = Duration::from_millis(self.config.cancel_confirm_timeout_ms);
         let start = std::time::Instant::now();
 
@@ -81,7 +80,7 @@ impl OrderExecutor {
             sleep(Duration::from_millis(100)).await;
         }
 
-        // Update local state for any still not confirmed
+        // Update local state for any still not confirmed via WS
         for id in &order_ids {
             if let Some(mut order) = state.my_orders.get_mut(id) {
                 if order.status != OrderStatus::Canceled {
@@ -118,11 +117,14 @@ impl OrderExecutor {
             risk_controller.register_cancel(id.clone());
         }
 
-        // TODO: Replace with actual API call
-        // DELETE /cancel-all
-        info!("Sent cancel-all request for {} orders", all_order_ids.len());
+        // Call real API cancel-all
+        if let Err(e) = self.client.cancel_all_orders().await {
+            error!("API cancel-all failed: {e:#}, marking locally");
+        } else {
+            info!("API cancel-all succeeded for {} orders", all_order_ids.len());
+        }
 
-        // Mark all as cancelled locally
+        // Mark all as cancelled locally regardless
         for id in &all_order_ids {
             if let Some(mut order) = state.my_orders.get_mut(id) {
                 order.status = OrderStatus::Canceled;
@@ -149,7 +151,7 @@ impl OrderExecutor {
                 }
                 Err(e) => {
                     error!("Batch submission failed: {e:#}");
-                    // Continue with next batch (partial success)
+                    // Continue with next batch (partial success is better than none)
                 }
             }
         }
@@ -163,22 +165,17 @@ impl OrderExecutor {
         Ok(submitted_ids)
     }
 
-    /// Submit a single batch of orders (max 15)
+    /// Submit a single batch of orders via SDK (max 15)
     async fn submit_batch(
         &self,
         state: &SharedState,
         batch: &[QuoteOrder],
     ) -> Result<Vec<String>> {
-        let mut ids = Vec::new();
+        // Use SDK batch submission
+        let order_ids = self.client.post_orders_batch(batch).await?;
 
-        // TODO: Replace with actual API call using polymarket-client-sdk
-        // POST /order { orders: [...] }
-        // Each order needs EIP-712 signing
-
-        for order in batch {
-            let order_id = uuid::Uuid::new_v4().to_string();
-
-            // Record in local state
+        // Record submitted orders in local state
+        for (order, order_id) in batch.iter().zip(order_ids.iter()) {
             state.my_orders.insert(
                 order_id.clone(),
                 OrderRecord {
@@ -187,33 +184,28 @@ impl OrderExecutor {
                     price: order.price,
                     size: order.size,
                     side: order.side,
-                    status: OrderStatus::Pending,
+                    status: OrderStatus::Live,
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
                 },
             );
 
             debug!(
-                "Order queued: id={order_id}, market={}, side={}, price={}, size={}",
+                "Order live: id={order_id}, market={}, side={}, price={}, size={}",
                 order.market_id, order.side, order.price, order.size
             );
-
-            ids.push(order_id);
         }
 
-        Ok(ids)
+        Ok(order_ids)
     }
 
-    /// Cancel with exponential backoff retry.
-    /// When actual API is integrated, this will retry on transient failures.
+    /// Cancel market orders with exponential backoff retry.
     async fn cancel_with_retry(&self, market_id: &str) -> Result<()> {
         let mut delay = Duration::from_millis(self.config.base_retry_delay_ms);
         let max_delay = Duration::from_millis(self.config.max_retry_delay_ms);
 
         for attempt in 0..self.config.max_retries {
-            // TODO: Replace with actual API call via polymarket-client-sdk
-            // POST /cancel-market-orders { market: market_id }
-            let result: Result<()> = Ok(()); // Stub: always succeeds for now
+            let result = self.client.cancel_all_orders().await;
 
             match result {
                 Ok(()) => {
@@ -221,19 +213,23 @@ impl OrderExecutor {
                     return Ok(());
                 }
                 Err(e) => {
-                    warn!(
-                        "Cancel attempt {attempt} failed for market={market_id}: {e:#}, \
-                         retrying in {delay:?}"
-                    );
-                    sleep(delay).await;
-                    delay = (delay * 2).min(max_delay);
+                    if attempt + 1 < self.config.max_retries {
+                        warn!(
+                            "Cancel attempt {} failed for market={market_id}: {e:#}, retrying in {delay:?}",
+                            attempt + 1
+                        );
+                        sleep(delay).await;
+                        delay = (delay * 2).min(max_delay);
+                    } else {
+                        return Err(e.context(format!(
+                            "Failed to cancel orders for market={market_id} after {} attempts",
+                            self.config.max_retries
+                        )));
+                    }
                 }
             }
         }
 
-        anyhow::bail!(
-            "Failed to cancel orders for market={market_id} after {} attempts",
-            self.config.max_retries
-        );
+        Ok(())
     }
 }

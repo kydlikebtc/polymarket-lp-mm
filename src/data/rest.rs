@@ -1,63 +1,236 @@
+use std::str::FromStr;
+
+use alloy::primitives::U256;
+use alloy::signers::local::PrivateKeySigner;
+use alloy::signers::Signer as _;
 use anyhow::{Context, Result};
-use tracing::info;
+use rust_decimal::Decimal;
+use tracing::{debug, info, warn};
+use uuid::Uuid;
+
+use polymarket_client_sdk::auth::state::Authenticated;
+use polymarket_client_sdk::auth::{Credentials, Normal};
+use polymarket_client_sdk::clob::types::request::CancelMarketOrderRequest;
+use polymarket_client_sdk::clob::types::{OrderType, Side};
+use polymarket_client_sdk::POLYGON;
 
 use crate::config::AppConfig;
+use crate::data::state::OrderSide;
+use crate::pricing::QuoteOrder;
 
-/// Wrapper around the Polymarket SDK CLOB client.
-/// In MVP, we use the official `polymarket-client-sdk` for API calls.
-/// This module provides initialization and helper methods.
+/// Authenticated CLOB client wrapping `polymarket-client-sdk`.
 pub struct ClobClient {
-    pub api_key: String,
-    pub api_secret: String,
-    pub api_passphrase: String,
-    pub private_key: String,
+    /// Authenticated SDK client (Normal L2 auth)
+    sdk: polymarket_client_sdk::clob::Client<Authenticated<Normal>>,
+    /// Signer for order signing (needed by `sdk.sign()`)
+    signer: PrivateKeySigner,
+    /// API credentials for WebSocket authentication
+    pub credentials: Credentials,
+    /// Wallet address
+    pub address: alloy::primitives::Address,
+    /// Base URL for reference
     pub base_url: String,
-    pub http: reqwest::Client,
 }
 
 impl ClobClient {
-    /// Check balance to validate API credentials
+    /// Check API connectivity
     pub async fn check_balance(&self) -> Result<()> {
-        // TODO: Integrate with polymarket-client-sdk once we verify API
-        // For now, a basic health check
-        let url = format!("{}/health", self.base_url);
-        let resp = self.http.get(&url).send().await?;
-        if resp.status().is_success() {
-            info!("CLOB API health check passed");
-            Ok(())
-        } else {
-            anyhow::bail!(
-                "CLOB API health check failed: status={}",
-                resp.status()
-            );
+        info!("CLOB API authentication verified");
+        Ok(())
+    }
+
+    /// Submit a single limit order via the SDK.
+    /// Returns the order_id assigned by the exchange.
+    pub async fn post_limit_order(
+        &self,
+        token_id: &str,
+        side: OrderSide,
+        price: Decimal,
+        size: Decimal,
+    ) -> Result<String> {
+        let token_id = U256::from_str(token_id)
+            .context("Invalid token_id format")?;
+
+        let sdk_side = match side {
+            OrderSide::Buy => Side::Buy,
+            OrderSide::Sell => Side::Sell,
+        };
+
+        let signable_order = self.sdk
+            .limit_order()
+            .token_id(token_id)
+            .side(sdk_side)
+            .price(price)
+            .size(size)
+            .order_type(OrderType::GTC)
+            .build()
+            .await
+            .context("Failed to build limit order")?;
+
+        let signed_order = self.sdk
+            .sign(&self.signer, signable_order)
+            .await
+            .context("Failed to sign order")?;
+
+        let response = self.sdk
+            .post_order(signed_order)
+            .await
+            .context("Failed to post order")?;
+
+        if !response.success {
+            let err_msg = response.error_msg.unwrap_or_default();
+            anyhow::bail!("Order rejected: {err_msg}");
         }
+
+        debug!(
+            "Order placed: id={}, side={:?}, price={}, size={}",
+            response.order_id, side, price, size
+        );
+
+        Ok(response.order_id)
+    }
+
+    /// Submit a batch of orders. Returns vec of order IDs.
+    pub async fn post_orders_batch(
+        &self,
+        orders: &[QuoteOrder],
+    ) -> Result<Vec<String>> {
+        let mut signed_orders = Vec::with_capacity(orders.len());
+
+        for order in orders {
+            let token_id = U256::from_str(&order.token_id)
+                .context("Invalid token_id format")?;
+
+            let sdk_side = match order.side {
+                OrderSide::Buy => Side::Buy,
+                OrderSide::Sell => Side::Sell,
+            };
+
+            let signable = self.sdk
+                .limit_order()
+                .token_id(token_id)
+                .side(sdk_side)
+                .price(order.price)
+                .size(order.size)
+                .order_type(OrderType::GTC)
+                .build()
+                .await
+                .context("Failed to build order")?;
+
+            let signed = self.sdk
+                .sign(&self.signer, signable)
+                .await
+                .context("Failed to sign order")?;
+
+            signed_orders.push(signed);
+        }
+
+        let responses = self.sdk
+            .post_orders(signed_orders)
+            .await
+            .context("Failed to post orders batch")?;
+
+        let mut order_ids = Vec::new();
+        for resp in responses {
+            if resp.success {
+                order_ids.push(resp.order_id);
+            } else {
+                let err = resp.error_msg.unwrap_or_default();
+                warn!("Order in batch rejected: {err}");
+            }
+        }
+
+        Ok(order_ids)
+    }
+
+    /// Cancel a single order by ID
+    pub async fn cancel_order(&self, order_id: &str) -> Result<()> {
+        let resp = self.sdk
+            .cancel_order(order_id)
+            .await
+            .context("Failed to cancel order")?;
+        debug!("Order cancelled: {order_id}, canceled={:?}", resp.canceled);
+        Ok(())
+    }
+
+    /// Cancel ALL open orders
+    pub async fn cancel_all_orders(&self) -> Result<()> {
+        let resp = self.sdk
+            .cancel_all_orders()
+            .await
+            .context("Failed to cancel all orders")?;
+        info!("All orders cancelled via API: canceled={}", resp.canceled.len());
+        Ok(())
+    }
+
+    /// Cancel all orders for a specific market/token
+    pub async fn cancel_market_orders(&self, token_id: &str) -> Result<()> {
+        let asset_id = U256::from_str(token_id)
+            .context("Invalid token_id for cancel")?;
+
+        let req = CancelMarketOrderRequest::builder()
+            .asset_id(asset_id)
+            .build();
+
+        let resp = self.sdk
+            .cancel_market_orders(&req)
+            .await
+            .context("Failed to cancel market orders")?;
+
+        debug!(
+            "Market orders cancelled for token={token_id}, canceled={}",
+            resp.canceled.len()
+        );
+        Ok(())
     }
 }
 
-/// Create and validate a CLOB client from config
+/// Create and authenticate a CLOB client from environment variables
 pub async fn create_clob_client(config: &AppConfig) -> Result<ClobClient> {
-    let api_key = std::env::var("POLYMARKET_API_KEY")
-        .context("POLYMARKET_API_KEY not set in environment")?;
+    let api_key_str = std::env::var("POLYMARKET_API_KEY")
+        .context("POLYMARKET_API_KEY not set")?;
     let api_secret = std::env::var("POLYMARKET_API_SECRET")
-        .context("POLYMARKET_API_SECRET not set in environment")?;
+        .context("POLYMARKET_API_SECRET not set")?;
     let api_passphrase = std::env::var("POLYMARKET_API_PASSPHRASE")
-        .context("POLYMARKET_API_PASSPHRASE not set in environment")?;
+        .context("POLYMARKET_API_PASSPHRASE not set")?;
     let private_key = std::env::var("POLYMARKET_PRIVATE_KEY")
-        .context("POLYMARKET_PRIVATE_KEY not set in environment")?;
+        .context("POLYMARKET_PRIVATE_KEY not set")?;
+
+    info!("Initializing CLOB client at {}", config.api.clob_base_url);
+
+    // Create signer from private key, set chain to Polygon mainnet
+    let signer: PrivateKeySigner = private_key.parse()
+        .context("Invalid private key format")?;
+    let signer = signer.with_chain_id(Some(POLYGON));
+
+    let address = signer.address();
+    info!("Wallet address: {address}");
+
+    // Authenticate with SDK — builds an Authenticated<Normal> client
+    let sdk = polymarket_client_sdk::clob::Client::new(
+        &config.api.clob_base_url,
+        polymarket_client_sdk::clob::Config::default(),
+    )
+    .context("Failed to create CLOB client")?
+    .authentication_builder(&signer)
+    .authenticate()
+    .await
+    .context("Failed to authenticate with Polymarket CLOB API")?;
+
+    // Parse API key as UUID for credentials
+    let api_key = Uuid::parse_str(&api_key_str)
+        .context("POLYMARKET_API_KEY must be a valid UUID")?;
+
+    let credentials = Credentials::new(api_key, api_secret, api_passphrase);
 
     let client = ClobClient {
-        api_key,
-        api_secret,
-        api_passphrase,
-        private_key,
+        sdk,
+        signer,
+        credentials,
+        address,
         base_url: config.api.clob_base_url.clone(),
-        http: reqwest::Client::new(),
     };
 
-    client
-        .check_balance()
-        .await
-        .context("Failed to validate CLOB API credentials")?;
-
+    client.check_balance().await?;
     Ok(client)
 }

@@ -1,194 +1,198 @@
+use std::str::FromStr;
+use std::sync::Arc;
+
+use alloy::primitives::{Address, U256};
 use anyhow::Result;
 use chrono::Utc;
+use futures::StreamExt;
 use rust_decimal::Decimal;
-use serde::Deserialize;
-use std::str::FromStr;
-use tokio::time::{Duration, interval};
-use tracing::{debug, info};
+use tokio::time::Duration;
+use tracing::{debug, error, info, warn};
+
+use polymarket_client_sdk::auth::Credentials;
+use polymarket_client_sdk::clob::ws::{self as sdk_ws, WsMessage};
 
 use super::SharedState;
 use crate::data::state::OrderStatus;
+use crate::risk::RiskController;
 
-/// WebSocket message types from Polymarket
-#[derive(Debug, Deserialize)]
-#[serde(tag = "event_type")]
-pub enum WsMarketEvent {
-    #[serde(rename = "book")]
-    Book {
-        market: String,
-        #[serde(default)]
-        bids: Vec<WsOrderLevel>,
-        #[serde(default)]
-        asks: Vec<WsOrderLevel>,
-    },
-    #[serde(rename = "price_change")]
-    PriceChange {
-        market: String,
-        price: String,
-    },
-    #[serde(rename = "last_trade_price")]
-    LastTradePrice {
-        market: String,
-        price: String,
-    },
-}
-
-#[derive(Debug, Deserialize)]
-pub struct WsOrderLevel {
-    pub price: String,
-    pub size: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct WsUserEvent {
-    #[serde(rename = "type")]
-    pub event_type: String,
-    pub order_id: Option<String>,
-    pub market: Option<String>,
-    pub side: Option<String>,
-    pub price: Option<String>,
-    pub size: Option<String>,
-    pub status: Option<String>,
-}
-
-/// Process a market WebSocket event and update shared state
-pub fn handle_market_event(state: &SharedState, event: &WsMarketEvent) {
-    match event {
-        WsMarketEvent::Book {
-            market,
-            bids,
-            asks,
-        } => {
-            let best_bid = bids
-                .first()
-                .and_then(|b| Decimal::from_str(&b.price).ok());
-            let best_ask = asks
-                .first()
-                .and_then(|a| Decimal::from_str(&a.price).ok());
-
-            if let Some(mut ms) = state.market_states.get_mut(market) {
-                if let (Some(bid), Some(ask)) = (best_bid, best_ask) {
-                    ms.best_bid = Some(bid);
-                    ms.best_ask = Some(ask);
-                    ms.midpoint = (bid + ask) / Decimal::TWO;
-                    ms.spread = ask - bid;
-                    ms.updated_at = Utc::now();
-
-                    // Record price for history
-                    state.record_price(market, ms.midpoint);
-
-                    debug!(
-                        "Book update: market={market}, mid={}, spread={}",
-                        ms.midpoint, ms.spread
-                    );
-                }
-            }
-        }
-        WsMarketEvent::PriceChange { market, price } => {
-            if let Ok(p) = Decimal::from_str(price) {
-                if let Some(mut ms) = state.market_states.get_mut(market) {
-                    ms.midpoint = p;
-                    ms.updated_at = Utc::now();
-                    state.record_price(market, p);
-                    debug!("Price change: market={market}, price={p}");
-                }
-            }
-        }
-        WsMarketEvent::LastTradePrice { market, price } => {
-            if let Ok(p) = Decimal::from_str(price) {
-                if let Some(mut ms) = state.market_states.get_mut(market) {
-                    ms.last_trade_price = Some(p);
-                    ms.updated_at = Utc::now();
-                }
-            }
-        }
-    }
-}
-
-/// Process a user WebSocket event (order updates)
-pub fn handle_user_event(
-    state: &SharedState,
-    event: &WsUserEvent,
-    ghost_fill_callback: &mut dyn FnMut(&str),
-) {
-    let Some(order_id) = &event.order_id else {
-        return;
-    };
-
-    match event.event_type.as_str() {
-        "placement" | "update" => {
-            let status = match event.status.as_deref() {
-                Some("LIVE") => OrderStatus::Live,
-                Some("MATCHED") => OrderStatus::Matched,
-                Some("CANCELED") => OrderStatus::Canceled,
-                _ => OrderStatus::Pending,
-            };
-
-            if let Some(mut order) = state.my_orders.get_mut(order_id) {
-                order.status = status;
-                order.updated_at = Utc::now();
-                debug!("Order update: id={order_id}, status={status:?}");
-            }
-
-            // Ghost fill detection: unexpected cancellation
-            if status == OrderStatus::Canceled {
-                ghost_fill_callback(order_id);
-            }
-        }
-        _ => {
-            debug!("Unknown user event type: {}", event.event_type);
-        }
-    }
-}
-
-/// Placeholder for WebSocket connection management.
-/// In the full implementation, this uses tokio-tungstenite with auto-reconnect.
+/// Run market data WebSocket using the SDK.
+/// Subscribes to orderbook updates for all configured token IDs.
+/// Updates SharedState with latest prices and spread.
 pub async fn run_market_ws(
     state: SharedState,
-    ws_url: String,
-    market_ids: Vec<String>,
+    token_ids: Vec<String>,
 ) -> Result<()> {
     info!(
-        "Market WebSocket connecting to {ws_url} for {} markets",
-        market_ids.len()
+        "Market WebSocket starting for {} tokens",
+        token_ids.len()
     );
 
-    // TODO: Replace with actual tokio-tungstenite connection
-    // For MVP, this is a stub that simulates the connection lifecycle
-    //
-    // The real implementation would:
-    // 1. Connect to wss://ws-subscriptions-clob.polymarket.com/ws/market
-    // 2. Send subscription: {"type":"subscribe","markets":["market_id"],"channels":["book","price_change"]}
-    // 3. Process incoming messages via handle_market_event
-    // 4. Send PING every 8 seconds
-    // 5. Auto-reconnect on disconnect with exponential backoff
+    let asset_ids: Vec<U256> = token_ids
+        .iter()
+        .map(|id| U256::from_str(id))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow::anyhow!("Invalid token_id: {e}"))?;
 
-    let mut ping_interval = interval(Duration::from_secs(8));
     loop {
-        ping_interval.tick().await;
-        // In real impl: send PING frame
+        match run_market_ws_inner(&state, &asset_ids).await {
+            Ok(()) => {
+                info!("Market WebSocket closed normally, reconnecting...");
+            }
+            Err(e) => {
+                error!("Market WebSocket error: {e:#}, reconnecting in 5s...");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
+async fn run_market_ws_inner(
+    state: &SharedState,
+    asset_ids: &[U256],
+) -> Result<()> {
+    let client = sdk_ws::Client::default();
+    let stream = client.subscribe_orderbook(asset_ids.to_vec())?;
+    let mut stream = Box::pin(stream);
+
+    info!("Market WebSocket connected, subscribed to {} assets", asset_ids.len());
+
+    // Update WS heartbeat
+    {
         let mut last_msg = state.ws_last_message.write().await;
         *last_msg = Utc::now();
     }
+
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(book) => {
+                // Update heartbeat timestamp
+                {
+                    let mut last_msg = state.ws_last_message.write().await;
+                    *last_msg = Utc::now();
+                }
+
+                let asset_id = book.asset_id.to_string();
+
+                // Extract best bid/ask from the book
+                let best_bid = book.bids.first().map(|b| b.price);
+                let best_ask = book.asks.first().map(|a| a.price);
+
+                if let Some(mut ms) = state.market_states.get_mut(&asset_id) {
+                    if let (Some(bid), Some(ask)) = (best_bid, best_ask) {
+                        ms.best_bid = Some(bid);
+                        ms.best_ask = Some(ask);
+                        ms.midpoint = (bid + ask) / Decimal::TWO;
+                        ms.spread = ask - bid;
+                        ms.updated_at = Utc::now();
+
+                        state.record_price(&asset_id, ms.midpoint);
+
+                        debug!(
+                            "Book update: asset={}, mid={}, spread={}, bids={}, asks={}",
+                            asset_id, ms.midpoint, ms.spread,
+                            book.bids.len(), book.asks.len()
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Market WS stream error: {e}");
+                return Err(e.into());
+            }
+        }
+    }
+
+    Ok(())
 }
 
-/// Placeholder for user WebSocket connection
+/// Run user events WebSocket using the SDK.
+/// Receives order placement/update/cancellation events.
+/// Updates SharedState and detects ghost fills via RiskController.
 pub async fn run_user_ws(
-    _state: SharedState,
-    ws_url: String,
-    _api_key: String,
+    state: SharedState,
+    credentials: Credentials,
+    address: Address,
+    risk_controller: Arc<tokio::sync::Mutex<RiskController>>,
 ) -> Result<()> {
-    info!("User WebSocket connecting to {ws_url}");
+    info!("User WebSocket starting for address={address}");
 
-    // TODO: Replace with actual authenticated WebSocket connection
-    // The real implementation would:
-    // 1. Connect to wss://ws-subscriptions-clob.polymarket.com/ws/user
-    // 2. Authenticate with API key
-    // 3. Process order_update events via handle_user_event
-    // 4. Maintain PING/PONG keepalive
-
-    let mut ping_interval = interval(Duration::from_secs(8));
     loop {
-        ping_interval.tick().await;
+        match run_user_ws_inner(&state, &credentials, address, &risk_controller).await {
+            Ok(()) => {
+                info!("User WebSocket closed normally, reconnecting...");
+            }
+            Err(e) => {
+                error!("User WebSocket error: {e:#}, reconnecting in 5s...");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
     }
+}
+
+async fn run_user_ws_inner(
+    state: &SharedState,
+    credentials: &Credentials,
+    address: Address,
+    risk_controller: &Arc<tokio::sync::Mutex<RiskController>>,
+) -> Result<()> {
+    let client = sdk_ws::Client::default()
+        .authenticate(credentials.clone(), address)?;
+
+    // Subscribe to all markets (empty vec = all)
+    let markets = Vec::new();
+    let stream = client.subscribe_user_events(markets)?;
+    let mut stream = std::pin::pin!(stream);
+
+    info!("User WebSocket connected and authenticated");
+
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(WsMessage::Order(order)) => {
+                let order_id = order.id.to_string();
+                debug!("User WS order event: id={order_id}, type={:?}", order.msg_type);
+
+                // Update order state
+                if let Some(mut our_order) = state.my_orders.get_mut(&order_id) {
+                    // Map SDK status to our OrderStatus
+                    // The msg_type indicates what happened to the order
+                    let new_status = match format!("{:?}", order.msg_type).as_str() {
+                        s if s.contains("Place") => OrderStatus::Live,
+                        s if s.contains("Cancel") => OrderStatus::Canceled,
+                        s if s.contains("Match") || s.contains("Fill") => OrderStatus::Matched,
+                        _ => our_order.status,
+                    };
+
+                    our_order.status = new_status;
+                    our_order.updated_at = Utc::now();
+
+                    // Ghost fill detection: if order was cancelled but we didn't initiate it
+                    if new_status == OrderStatus::Canceled {
+                        let mut rc = risk_controller.lock().await;
+                        if !rc.is_our_cancel(&order_id) {
+                            warn!("Ghost fill detected! Order {order_id} cancelled without our request");
+                            rc.record_ghost_fill();
+                        }
+                    }
+                }
+            }
+            Ok(WsMessage::Trade(trade)) => {
+                debug!(
+                    "User WS trade: id={}, market={}, side={:?}, price={}, size={}",
+                    trade.id, trade.market, trade.side, trade.price, trade.size
+                );
+                // Trade events can be used for PnL tracking
+                // For MVP, just log them
+            }
+            Ok(_other) => {
+                // Other message types (heartbeat, etc.)
+            }
+            Err(e) => {
+                warn!("User WS stream error: {e}");
+                return Err(e.into());
+            }
+        }
+    }
+
+    Ok(())
 }
