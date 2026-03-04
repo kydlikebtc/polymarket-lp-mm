@@ -46,10 +46,14 @@ pub async fn run_orchestrator(
                 if balance > Decimal::ZERO {
                     if let Some(mut pos) = state.positions.get_mut(&market.market_id) {
                         pos.yes_shares = balance;
+                        // Compute initial yes_value so IIR is non-zero before first position_tick
+                        if let Some(ms) = state.market_states.get(&market.market_id) {
+                            pos.yes_value = balance * ms.midpoint;
+                        }
                         pos.updated_at = Utc::now();
                         info!(
-                            "Loaded initial position: market={}, YES shares={}",
-                            market.name, balance
+                            "Loaded initial position: market={}, YES shares={}, value={}",
+                            market.name, balance, pos.yes_value
                         );
                     }
                 }
@@ -235,9 +239,14 @@ pub async fn run_orchestrator(
             }
 
             // Metrics logging (every 60 seconds)
+            // Read risk level first, then release lock before reading PnL
+            // to prevent deadlock (WS task acquires daily_pnl write → risk_controller lock)
             _ = metrics_tick.tick() => {
-                let rc = risk_controller.lock().await;
-                log_metrics(&state, &config, &rc).await;
+                let risk_level = {
+                    let rc = risk_controller.lock().await;
+                    rc.level()
+                };
+                log_metrics(&state, &config, risk_level).await;
             }
 
             // Refresh settlement times from Gamma API (every 30 minutes)
@@ -379,7 +388,22 @@ async fn run_market_strategy(
     }
 
     // Step 1: Cancel existing orders (lock acquired briefly inside method)
-    executor.cancel_market_orders(state, market_id, risk_controller).await?;
+    let cancelled_ids = executor.cancel_market_orders(state, market_id, risk_controller).await?;
+
+    // Verify all cancels were confirmed via WS, not just locally timed out.
+    // If any orders were force-marked (no WS confirmation), skip this round
+    // to avoid potential double exposure from stale orders still live on exchange.
+    if !cancelled_ids.is_empty() {
+        let still_live = state.my_orders.iter()
+            .filter(|o| o.market_id == market_id && o.status == crate::data::state::OrderStatus::Live)
+            .count();
+        if still_live > 0 {
+            warn!(
+                "Market {market_id} still has {still_live} orders not confirmed cancelled, skipping this round"
+            );
+            return Ok(());
+        }
+    }
 
     // Safety check: verify WS is still connected before submitting new orders.
     // If WS is down, we won't receive fill/cancel confirmations, risking double exposure.
@@ -470,7 +494,6 @@ async fn handle_position_action(
                 }
             }
         }
-        _ => {} // Skew actions are handled by pricing engine
     }
 }
 
@@ -512,7 +535,7 @@ async fn prune_stale_state(
 async fn log_metrics(
     state: &SharedState,
     config: &AppConfig,
-    risk_controller: &RiskController,
+    risk_level: RiskLevel,
 ) {
     let active_orders = state
         .my_orders
@@ -524,7 +547,7 @@ async fn log_metrics(
 
     info!(
         "METRICS | Risk={} | ActiveOrders={} | Markets={} | DailyPnL=${:.2} | Fills={}",
-        risk_controller.level(),
+        risk_level,
         active_orders,
         config.markets.len(),
         pnl.realized_pnl,

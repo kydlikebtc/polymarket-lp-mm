@@ -158,17 +158,23 @@ impl OrderExecutor {
         }
 
         // Call real API cancel-all (NO lock held during HTTP)
-        if let Err(e) = self.client.cancel_all_orders().await {
-            error!("API cancel-all failed: {e:#}, marking locally");
-        } else {
-            info!("API cancel-all succeeded for {} orders", all_order_ids.len());
-        }
-
-        // Mark all as cancelled locally regardless
-        for id in &all_order_ids {
-            if let Some(mut order) = state.my_orders.get_mut(id) {
-                order.status = OrderStatus::Canceled;
-                order.updated_at = Utc::now();
+        match self.client.cancel_all_orders().await {
+            Ok(()) => {
+                info!("API cancel-all succeeded for {} orders", all_order_ids.len());
+                // Only mark locally after API confirms success
+                for id in &all_order_ids {
+                    if let Some(mut order) = state.my_orders.get_mut(id) {
+                        order.status = OrderStatus::Canceled;
+                        order.updated_at = Utc::now();
+                    }
+                }
+            }
+            Err(e) => {
+                // Do NOT mark as cancelled locally — orders may still be live on exchange.
+                // L3 loop will re-attempt cancel on next tick.
+                error!(
+                    "API cancel-all FAILED: {e:#}. Orders NOT marked locally — will retry on next tick."
+                );
             }
         }
 

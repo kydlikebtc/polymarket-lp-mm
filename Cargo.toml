@@ -20,9 +20,6 @@ toml = "0.8"
 # Config & environment
 dotenvy = "0.15"
 
-# HTTP
-reqwest = { version = "0.12", features = ["json"] }
-
 # Crypto
 alloy = { version = "1.6", features = ["signers", "signer-local", "provider-http", "contract"] }
 rust_decimal = "1.40"
@@ -37,10 +34,6 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Error handling
 anyhow = "1.0"
-thiserror = "2"
-
-# Database
-rusqlite = { version = "0.33", features = ["bundled"] }
 
 # Utils
 uuid = { version = "1.21", features = ["v4"] }

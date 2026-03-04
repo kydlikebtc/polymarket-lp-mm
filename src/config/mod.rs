@@ -65,16 +65,12 @@ pub struct LayerConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PositionConfig {
-    /// IIR thresholds for response tiers
-    pub iir_light_threshold: Decimal,   // e.g., 0.3
-    pub iir_medium_threshold: Decimal,  // e.g., 0.5 (triggers L2)
-    pub iir_extreme_threshold: Decimal, // e.g., 0.75 (triggers L3)
-    /// Light skew factor (when |IIR| < light)
-    pub light_skew: Decimal,  // e.g., 0.005
-    /// Medium skew factor (when light <= |IIR| < medium)
-    pub medium_skew: Decimal, // e.g., 0.015
+    /// IIR threshold for L2 escalation (e.g., 0.5)
+    pub iir_medium_threshold: Decimal,
+    /// IIR threshold for L3 escalation (e.g., 0.75)
+    pub iir_extreme_threshold: Decimal,
     /// Minimum merge size in USDC
-    pub min_merge_size: Decimal, // e.g., 100
+    pub min_merge_size: Decimal,
     /// Merge cooldown in seconds
     pub merge_cooldown_secs: u64,
 }
@@ -174,6 +170,43 @@ impl AppConfig {
                 "Layer {i} capital_fraction must be in (0, 1]"
             );
         }
+
+        // Risk parameter sanity checks
+        let r = &self.risk;
+        anyhow::ensure!(
+            r.l3_iir_threshold > r.l2_iir_threshold,
+            "l3_iir_threshold ({}) must be > l2_iir_threshold ({})",
+            r.l3_iir_threshold, r.l2_iir_threshold
+        );
+        anyhow::ensure!(
+            r.l3_price_change_5min > r.l2_price_change_5min,
+            "l3_price_change_5min ({}) must be > l2_price_change_5min ({})",
+            r.l3_price_change_5min, r.l2_price_change_5min
+        );
+        anyhow::ensure!(
+            r.l3_daily_loss_pct > r.l2_daily_loss_pct,
+            "l3_daily_loss_pct ({}) must be > l2_daily_loss_pct ({})",
+            r.l3_daily_loss_pct, r.l2_daily_loss_pct
+        );
+        anyhow::ensure!(
+            r.l3_daily_loss_pct <= Decimal::ONE,
+            "l3_daily_loss_pct ({}) must be <= 1.0",
+            r.l3_daily_loss_pct
+        );
+        anyhow::ensure!(
+            r.l2_ws_disconnect_secs > 0,
+            "l2_ws_disconnect_secs must be > 0"
+        );
+        anyhow::ensure!(
+            self.capital.max_per_market_fraction > Decimal::ZERO
+                && self.capital.max_per_market_fraction <= Decimal::ONE,
+            "max_per_market_fraction ({}) must be in (0, 1.0]",
+            self.capital.max_per_market_fraction
+        );
+        anyhow::ensure!(
+            self.execution.max_retries > 0,
+            "execution.max_retries must be > 0"
+        );
 
         Ok(())
     }

@@ -1,5 +1,7 @@
 /target
 .env
 .env.*
+!.env.example
+config.toml
 *.log
 .loki/

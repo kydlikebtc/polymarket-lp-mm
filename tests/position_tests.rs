@@ -6,11 +6,8 @@ use polymarket_mm::position::{PositionAction, PositionManager};
 
 fn test_position_config() -> PositionConfig {
     PositionConfig {
-        iir_light_threshold: dec!(0.3),
         iir_medium_threshold: dec!(0.5),
         iir_extreme_threshold: dec!(0.75),
-        light_skew: dec!(0.005),
-        medium_skew: dec!(0.015),
         min_merge_size: dec!(100),
         merge_cooldown_secs: 300,
     }
@@ -58,48 +55,41 @@ fn test_iir_calculation() {
 }
 
 #[test]
-fn test_balanced_position_no_action() {
+fn test_balanced_position_no_escalation() {
     let manager = PositionManager::new(&test_position_config());
     let pos = make_position(100.0, 100.0, 0.5);
 
     let actions = manager.evaluate(&pos);
 
-    // Should have merge action (since both sides have 100 shares) + NoAction
-    let has_merge = actions.iter().any(|a| matches!(a, PositionAction::TriggerMerge { .. }));
-    let has_no_action = actions.iter().any(|a| matches!(a, PositionAction::NoAction));
+    // Should have merge action (since both sides have 100 shares) but no escalation
+    let has_merge = actions
+        .iter()
+        .any(|a| matches!(a, PositionAction::TriggerMerge { .. }));
+    let has_escalation = actions.iter().any(|a| {
+        matches!(
+            a,
+            PositionAction::EscalateL2 { .. } | PositionAction::EscalateL3 { .. }
+        )
+    });
 
     assert!(has_merge, "Balanced 100/100 should trigger merge");
-    assert!(has_no_action, "Balanced IIR should result in NoAction");
+    assert!(!has_escalation, "Balanced IIR should not escalate");
 }
 
 #[test]
-fn test_light_imbalance_skew() {
+fn test_light_imbalance_no_action() {
     let manager = PositionManager::new(&test_position_config());
-    // IIR = 20/100 = 0.2 (light, between 0.05 and 0.3)
+    // IIR = 20/100 = 0.2 (below medium threshold 0.5)
     let pos = make_position(40.0, 0.0, 0.5);
 
     let actions = manager.evaluate(&pos);
 
-    let has_skew = actions
-        .iter()
-        .any(|a| matches!(a, PositionAction::ApplySkew { .. }));
-
-    assert!(has_skew, "Light imbalance should produce ApplySkew action");
-}
-
-#[test]
-fn test_medium_imbalance_reduces_size() {
-    let manager = PositionManager::new(&test_position_config());
-    // IIR = (60-20)/100 = 0.4 (medium, between 0.3 and 0.5)
-    let pos = make_position(120.0, 40.0, 0.5);
-
-    let actions = manager.evaluate(&pos);
-
-    let has_reduce = actions
-        .iter()
-        .any(|a| matches!(a, PositionAction::ReduceQuoteSize { .. }));
-
-    assert!(has_reduce, "Medium imbalance should produce ReduceQuoteSize action");
+    // Light imbalance is handled by PricingEngine::compute_skew,
+    // PositionManager should not produce any actions
+    assert!(
+        actions.is_empty(),
+        "Light imbalance should produce no position actions (handled by PricingEngine)"
+    );
 }
 
 #[test]

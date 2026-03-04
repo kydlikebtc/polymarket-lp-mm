@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -22,22 +23,27 @@ pub struct SharedState {
     pub settlement_times: Arc<DashMap<String, DateTime<Utc>>>,
 }
 
-/// Tracks realized PnL from trade events using weighted-average cost basis.
+/// Per-market cost basis for weighted-average PnL tracking.
+#[derive(Debug, Clone)]
+struct MarketCostBasis {
+    avg_cost: Decimal,
+    shares_held: Decimal,
+}
+
+/// Tracks realized PnL from trade events using per-market weighted-average cost basis.
 ///
-/// Buy fills accumulate cost basis; Sell fills realize PnL against average cost.
-/// This gives economically correct realized PnL rather than raw cash-flow accounting.
+/// Each market maintains an independent cost basis. Buy fills accumulate cost basis;
+/// Sell fills realize PnL = (sell_price - avg_cost) * size against that market's basis.
 #[derive(Debug, Clone)]
 pub struct PnlTracker {
-    /// Cumulative realized PnL for the current day (USDC)
+    /// Cumulative realized PnL for the current day across all markets (USDC)
     pub realized_pnl: Decimal,
     /// Day this tracker is for
     pub date: chrono::NaiveDate,
     /// Number of fills tracked
     pub fill_count: u64,
-    /// Weighted-average cost per share (for YES tokens held)
-    avg_cost: Decimal,
-    /// Total shares held (cost basis applies to)
-    shares_held: Decimal,
+    /// Per-market cost basis (market_id → basis)
+    market_bases: HashMap<String, MarketCostBasis>,
 }
 
 impl PnlTracker {
@@ -46,16 +52,15 @@ impl PnlTracker {
             realized_pnl: Decimal::ZERO,
             date: Utc::now().date_naive(),
             fill_count: 0,
-            avg_cost: Decimal::ZERO,
-            shares_held: Decimal::ZERO,
+            market_bases: HashMap::new(),
         }
     }
 
-    /// Record a fill using weighted-average cost basis.
+    /// Record a fill using per-market weighted-average cost basis.
     ///
-    /// BUY: increases position, updates average cost.
-    /// SELL: realizes PnL = (sell_price - avg_cost) * size.
-    pub fn record_fill(&mut self, side: OrderSide, price: Decimal, size: Decimal) {
+    /// BUY: increases position in market, updates that market's average cost.
+    /// SELL: realizes PnL = (sell_price - market_avg_cost) * size.
+    pub fn record_fill(&mut self, market_id: &str, side: OrderSide, price: Decimal, size: Decimal) {
         let today = Utc::now().date_naive();
         if today != self.date {
             // Day rolled over — reset PnL but keep cost basis for overnight positions
@@ -64,23 +69,25 @@ impl PnlTracker {
             self.fill_count = 0;
         }
 
+        let basis = self.market_bases.entry(market_id.to_string()).or_insert(MarketCostBasis {
+            avg_cost: Decimal::ZERO,
+            shares_held: Decimal::ZERO,
+        });
+
         match side {
             OrderSide::Buy => {
-                // Update weighted-average cost: new_avg = (old_cost * old_shares + price * size) / (old_shares + size)
-                let total_cost = self.avg_cost * self.shares_held + price * size;
-                self.shares_held += size;
-                if self.shares_held > Decimal::ZERO {
-                    self.avg_cost = total_cost / self.shares_held;
+                let total_cost = basis.avg_cost * basis.shares_held + price * size;
+                basis.shares_held += size;
+                if basis.shares_held > Decimal::ZERO {
+                    basis.avg_cost = total_cost / basis.shares_held;
                 }
             }
             OrderSide::Sell => {
-                // Realize PnL against average cost
-                let pnl = (price - self.avg_cost) * size;
+                let pnl = (price - basis.avg_cost) * size;
                 self.realized_pnl += pnl;
-                self.shares_held = (self.shares_held - size).max(Decimal::ZERO);
-                // avg_cost stays the same for remaining shares
-                if self.shares_held.is_zero() {
-                    self.avg_cost = Decimal::ZERO;
+                basis.shares_held = (basis.shares_held - size).max(Decimal::ZERO);
+                if basis.shares_held.is_zero() {
+                    basis.avg_cost = Decimal::ZERO;
                 }
             }
         }
@@ -273,8 +280,8 @@ impl SharedState {
             timestamp: Utc::now(),
         });
 
-        // Keep only last 30 minutes of history (same lock scope)
-        let cutoff = Utc::now() - chrono::Duration::minutes(30);
+        // Keep only last 60 minutes of history (matches compute_vaf 1-hour window)
+        let cutoff = Utc::now() - chrono::Duration::minutes(60);
         entry.retain(|p| p.timestamp >= cutoff);
     }
 

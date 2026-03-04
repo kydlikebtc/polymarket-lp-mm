@@ -8,19 +8,11 @@ use tracing::{debug, info, warn};
 use crate::config::PositionConfig;
 use crate::data::state::{PositionRecord, SharedState};
 
-/// Action determined by position manager
-#[allow(dead_code)]
+/// Action determined by position manager.
+/// Note: Quote skewing and size adjustment are handled directly by PricingEngine
+/// via its own compute_skew(iir) — only merge and risk-escalation actions live here.
 #[derive(Debug, Clone)]
 pub enum PositionAction {
-    /// No action needed
-    NoAction,
-    /// Apply quote skewing with this factor
-    ApplySkew { skew: Decimal },
-    /// Reduce quote size on the overweight side
-    ReduceQuoteSize {
-        skew: Decimal,
-        size_multiplier: Decimal,
-    },
     /// Trigger merge: combine YES + NO into USDC
     TriggerMerge {
         market_id: String,
@@ -113,20 +105,9 @@ impl PositionManager {
                 market_id: position.market_id.clone(),
                 iir,
             });
-        } else if abs_iir >= self.config.iir_light_threshold {
-            // 0.3 <= |IIR| < 0.5 → Medium skew + reduce overweight side
-            let skew = -iir * self.config.medium_skew;
-            actions.push(PositionAction::ReduceQuoteSize {
-                skew,
-                size_multiplier: dec!(0.5),
-            });
-        } else if abs_iir > dec!(0.05) {
-            // 0.05 < |IIR| < 0.3 → Light skew only
-            let skew = -iir * self.config.light_skew;
-            actions.push(PositionAction::ApplySkew { skew });
-        } else {
-            actions.push(PositionAction::NoAction);
         }
+        // Note: lighter IIR levels (|IIR| < 0.5) are handled automatically
+        // by PricingEngine::compute_skew(iir) — no action needed here.
 
         actions
     }

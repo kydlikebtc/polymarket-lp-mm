@@ -241,21 +241,24 @@ async fn run_user_ws_inner(
                     }
                 };
 
-                // Record PnL
+                // Resolve market_id before recording PnL or updating position
+                let Some(resolved) = state.resolve_market_id(&trade.asset_id.to_string()) else {
+                    warn!(
+                        "Cannot resolve market_id for trade asset_id={}, skipping PnL and position update",
+                        trade.asset_id
+                    );
+                    continue;
+                };
+
+                // Record PnL with per-market cost basis
                 {
                     let mut pnl = state.daily_pnl.write().await;
-                    pnl.record_fill(our_side, trade.price, trade.size);
+                    pnl.record_fill(&resolved, our_side, trade.price, trade.size);
                     debug!(
-                        "PnL update: realized={}, fills={}",
+                        "PnL update: market={resolved}, realized={}, fills={}",
                         pnl.realized_pnl, pnl.fill_count
                     );
                 }
-
-                // Update position: BUY adds shares, SELL removes shares
-                let market_id = trade.market.to_string();
-                // Try to resolve via token_to_market; trade.market is condition_id
-                let resolved = state.resolve_market_id(&trade.asset_id.to_string())
-                    .unwrap_or(market_id);
 
                 if let Some(mut pos) = state.positions.get_mut(&resolved) {
                     match our_side {
@@ -270,7 +273,7 @@ async fn run_user_ws_inner(
                     // so IIR reflects the fill without waiting for position_tick
                     if let Some(ms) = state.market_states.get(&resolved) {
                         pos.yes_value = pos.yes_shares * ms.midpoint;
-                        pos.no_value = pos.no_shares * ms.midpoint;
+                        pos.no_value = pos.no_shares * (Decimal::ONE - ms.midpoint);
                     }
                     pos.updated_at = Utc::now();
                 }

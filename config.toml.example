@@ -57,13 +57,10 @@ capital_fraction = "0.40"           # 40%
 # ═══════════════════════════════════════════════════════
 
 [position]
-iir_light_threshold = "0.3"
-iir_medium_threshold = "0.5"
-iir_extreme_threshold = "0.75"
-light_skew = "0.005"                # 0.5 cents
-medium_skew = "0.015"               # 1.5 cents
-min_merge_size = "100.0"            # $100 minimum
-merge_cooldown_secs = 300           # 5 minutes
+iir_medium_threshold = "0.5"        # L2 escalation from position manager
+iir_extreme_threshold = "0.75"      # L3 escalation from position manager
+min_merge_size = "100.0"            # $100 minimum for YES+NO merge
+merge_cooldown_secs = 300           # 5 minutes between merges
 
 # ═══════════════════════════════════════════════════════
 # Risk control thresholds
