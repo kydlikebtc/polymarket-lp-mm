@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use chrono::Utc;
+use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
 
@@ -42,13 +45,13 @@ impl OrderExecutor {
     }
 
     /// Cancel all orders for a specific market.
-    /// Registers cancel requests in RiskController for ghost fill detection.
-    /// Returns the set of order IDs that were cancelled.
+    /// Acquires RiskController lock briefly for ghost fill registration,
+    /// then releases before HTTP calls to avoid blocking WS task.
     pub async fn cancel_market_orders(
         &mut self,
         state: &SharedState,
         market_id: &str,
-        risk_controller: &mut RiskController,
+        risk_controller: &Arc<Mutex<RiskController>>,
     ) -> Result<Vec<String>> {
         let order_ids: Vec<String> = state
             .my_orders
@@ -70,9 +73,12 @@ impl OrderExecutor {
             order_ids.len()
         );
 
-        // Register cancel requests in RiskController (single source of truth for ghost fill detection)
-        for id in &order_ids {
-            risk_controller.register_cancel(id.clone());
+        // Brief lock: register cancel requests for ghost fill detection, then release
+        {
+            let mut rc = risk_controller.lock().await;
+            for id in &order_ids {
+                rc.register_cancel(id.clone());
+            }
         }
 
         // Look up token_id for per-market cancel (API uses token_id, not market_id)
@@ -82,7 +88,7 @@ impl OrderExecutor {
             .find(|entry| entry.value() == market_id)
             .map(|entry| entry.key().clone());
 
-        // Call real API with retry — use per-market cancel when possible
+        // Call real API with retry (NO lock held during HTTP)
         match &token_id {
             Some(tid) => self.cancel_market_with_retry(tid).await?,
             None => {
@@ -91,7 +97,7 @@ impl OrderExecutor {
             }
         }
 
-        // Wait for confirmation via WebSocket (with timeout)
+        // Wait for confirmation via WebSocket (with timeout, NO lock held)
         let timeout = Duration::from_millis(self.config.cancel_confirm_timeout_ms);
         let start = std::time::Instant::now();
 
@@ -127,11 +133,11 @@ impl OrderExecutor {
     }
 
     /// Cancel ALL orders across all markets (L3 emergency).
-    /// Registers cancel requests in RiskController for ghost fill detection.
+    /// Acquires RiskController lock briefly for registration, then releases before HTTP.
     pub async fn cancel_all_orders(
         &mut self,
         state: &SharedState,
-        risk_controller: &mut RiskController,
+        risk_controller: &Arc<Mutex<RiskController>>,
     ) -> Result<()> {
         warn!("EMERGENCY: Cancelling ALL orders across all markets");
 
@@ -144,12 +150,15 @@ impl OrderExecutor {
             .map(|entry| entry.order_id.clone())
             .collect();
 
-        // Register all cancels in RiskController
-        for id in &all_order_ids {
-            risk_controller.register_cancel(id.clone());
+        // Brief lock: register cancel requests
+        {
+            let mut rc = risk_controller.lock().await;
+            for id in &all_order_ids {
+                rc.register_cancel(id.clone());
+            }
         }
 
-        // Call real API cancel-all
+        // Call real API cancel-all (NO lock held during HTTP)
         if let Err(e) = self.client.cancel_all_orders().await {
             error!("API cancel-all failed: {e:#}, marking locally");
         } else {
@@ -197,35 +206,42 @@ impl OrderExecutor {
         Ok(submitted_ids)
     }
 
-    /// Submit a single batch of orders via SDK (max 15)
+    /// Submit a single batch of orders via SDK (max 15).
+    /// Uses index-aligned Option results to correctly pair responses with input orders.
     async fn submit_batch(
         &self,
         state: &SharedState,
         batch: &[QuoteOrder],
     ) -> Result<Vec<String>> {
-        // Use SDK batch submission
-        let order_ids = self.client.post_orders_batch(batch).await?;
+        // Returns Vec<Option<String>> preserving index alignment with batch
+        let results = self.client.post_orders_batch(batch).await?;
 
-        // Record submitted orders in local state
-        for (order, order_id) in batch.iter().zip(order_ids.iter()) {
-            state.my_orders.insert(
-                order_id.clone(),
-                OrderRecord {
-                    order_id: order_id.clone(),
-                    market_id: order.market_id.clone(),
-                    price: order.price,
-                    size: order.size,
-                    side: order.side,
-                    status: OrderStatus::Live,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                },
-            );
+        let mut order_ids = Vec::new();
 
-            debug!(
-                "Order live: id={order_id}, market={}, side={}, price={}, size={}",
-                order.market_id, order.side, order.price, order.size
-            );
+        for (i, maybe_id) in results.iter().enumerate() {
+            if let Some(order_id) = maybe_id {
+                let order = &batch[i];
+                state.my_orders.insert(
+                    order_id.clone(),
+                    OrderRecord {
+                        order_id: order_id.clone(),
+                        market_id: order.market_id.clone(),
+                        price: order.price,
+                        size: order.size,
+                        side: order.side,
+                        status: OrderStatus::Live,
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                    },
+                );
+
+                debug!(
+                    "Order live: id={order_id}, market={}, side={}, price={}, size={}",
+                    order.market_id, order.side, order.price, order.size
+                );
+
+                order_ids.push(order_id.clone());
+            }
         }
 
         Ok(order_ids)

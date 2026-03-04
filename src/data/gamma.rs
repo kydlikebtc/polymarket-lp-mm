@@ -73,7 +73,7 @@ impl GammaClient {
 /// Returns None if end_date is in the past.
 pub fn hours_until(end_date: &DateTime<Utc>) -> Option<f64> {
     let duration = *end_date - Utc::now();
-    let hours = duration.num_minutes() as f64 / 60.0;
+    let hours = duration.num_seconds() as f64 / 3600.0;
     if hours <= 0.0 {
         None
     } else {

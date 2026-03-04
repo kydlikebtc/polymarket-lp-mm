@@ -67,9 +67,15 @@ pub async fn run_orchestrator(
     match executor.client().fetch_open_orders().await {
         Ok(orders) => {
             for order in &orders {
-                let market_id = state
-                    .resolve_market_id(&order.asset_id.to_string())
-                    .unwrap_or_default();
+                // Resolve token → market; skip unrecognized tokens
+                let Some(market_id) = state.resolve_market_id(&order.asset_id.to_string()) else {
+                    warn!(
+                        "Skipping open order {} with unrecognized token_id {}",
+                        order.id, order.asset_id
+                    );
+                    continue;
+                };
+                // Map SDK side; skip unknown variants
                 let side = match order.side {
                     polymarket_client_sdk::clob::types::Side::Buy => {
                         crate::data::state::OrderSide::Buy
@@ -77,7 +83,13 @@ pub async fn run_orchestrator(
                     polymarket_client_sdk::clob::types::Side::Sell => {
                         crate::data::state::OrderSide::Sell
                     }
-                    _ => crate::data::state::OrderSide::Buy,
+                    other => {
+                        warn!(
+                            "Skipping open order {} with unknown side {:?}",
+                            order.id, other
+                        );
+                        continue;
+                    }
                 };
                 state.my_orders.insert(
                     order.id.clone(),
@@ -138,6 +150,8 @@ pub async fn run_orchestrator(
     let mut metrics_tick = interval(Duration::from_secs(60));
     // Settlement time refresh interval (every 30 minutes)
     let mut settlement_tick = interval(Duration::from_secs(1800));
+    // State cleanup interval (every 5 minutes)
+    let mut cleanup_tick = interval(Duration::from_secs(300));
 
     // Track last quote midpoints per market
     let mut last_quote_midpoints: std::collections::HashMap<String, Decimal> =
@@ -164,8 +178,7 @@ pub async fn run_orchestrator(
                             matches!(o.status, crate::data::state::OrderStatus::Live | crate::data::state::OrderStatus::Pending)
                         });
                         if has_active {
-                            let mut rc = risk_controller.lock().await;
-                            if let Err(e) = executor.cancel_all_orders(&state, &mut rc).await {
+                            if let Err(e) = executor.cancel_all_orders(&state, &risk_controller).await {
                                 error!("Failed to cancel all orders in L3: {e:#}");
                             }
                             warn!("L3 Emergency active. All orders cancelled. Waiting for manual recovery.");
@@ -238,11 +251,15 @@ pub async fn run_orchestrator(
                 }
             }
 
+            // Periodic cleanup of stale state (every 5 minutes)
+            _ = cleanup_tick.tick() => {
+                prune_stale_state(&state, &risk_controller).await;
+            }
+
             // Graceful shutdown
             _ = signal::ctrl_c() => {
                 warn!("Ctrl+C received, initiating graceful shutdown...");
-                let mut rc = risk_controller.lock().await;
-                if let Err(e) = executor.cancel_all_orders(&state, &mut rc).await {
+                if let Err(e) = executor.cancel_all_orders(&state, &risk_controller).await {
                     error!("Failed to cancel orders during shutdown: {e:#}");
                 }
                 info!("All orders cancelled. Shutdown complete.");
@@ -357,16 +374,12 @@ async fn run_market_strategy(
     // TF = 0 means stop market making
     if tf.is_zero() {
         info!("Market {market_id} approaching settlement, stopping");
-        let mut rc = risk_controller.lock().await;
-        executor.cancel_market_orders(state, market_id, &mut rc).await?;
+        executor.cancel_market_orders(state, market_id, risk_controller).await?;
         return Ok(());
     }
 
-    // Step 1: Cancel existing orders
-    {
-        let mut rc = risk_controller.lock().await;
-        executor.cancel_market_orders(state, market_id, &mut rc).await?;
-    }
+    // Step 1: Cancel existing orders (lock acquired briefly inside method)
+    executor.cancel_market_orders(state, market_id, risk_controller).await?;
 
     // Step 2: Generate new quotes
     let orders = pricing_engine.generate_quotes(
@@ -426,17 +439,54 @@ async fn handle_position_action(
         }
         PositionAction::EscalateL3 { market_id, iir } => {
             warn!("Position escalation to L3 from PositionManager: market={market_id}, IIR={iir}");
-            let mut rc = risk_controller.lock().await;
-            let iirs = vec![(market_id.clone(), *iir)];
-            let prices = vec![(market_id.clone(), Decimal::ZERO)];
-            rc.evaluate(&iirs, &prices, 0);
-            if rc.level() == RiskLevel::L3Emergency {
-                if let Err(e) = executor.cancel_all_orders(state, &mut rc).await {
+            let should_cancel = {
+                let mut rc = risk_controller.lock().await;
+                let iirs = vec![(market_id.clone(), *iir)];
+                let prices = vec![(market_id.clone(), Decimal::ZERO)];
+                rc.evaluate(&iirs, &prices, 0);
+                rc.level() == RiskLevel::L3Emergency
+            };
+            if should_cancel {
+                if let Err(e) = executor.cancel_all_orders(state, risk_controller).await {
                     error!("Failed to cancel orders for L3 escalation: {e:#}");
                 }
             }
         }
         _ => {} // Skew actions are handled by pricing engine
+    }
+}
+
+/// Prune stale entries from my_orders and cancel_requests to prevent unbounded growth
+async fn prune_stale_state(
+    state: &SharedState,
+    risk_controller: &Arc<Mutex<RiskController>>,
+) {
+    let cutoff = Utc::now() - chrono::Duration::minutes(5);
+
+    // Remove orders that have been Canceled or Matched for over 5 minutes
+    let stale_ids: Vec<String> = state
+        .my_orders
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.status,
+                crate::data::state::OrderStatus::Canceled | crate::data::state::OrderStatus::Matched
+            ) && entry.updated_at < cutoff
+        })
+        .map(|entry| entry.order_id.clone())
+        .collect();
+
+    if !stale_ids.is_empty() {
+        for id in &stale_ids {
+            state.my_orders.remove(id);
+        }
+        info!("Pruned {} stale orders from local state", stale_ids.len());
+    }
+
+    // Clean expired cancel requests from RiskController
+    {
+        let mut rc = risk_controller.lock().await;
+        rc.prune_stale_cancels(cutoff);
     }
 }
 

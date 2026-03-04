@@ -16,6 +16,8 @@ fn test_position_config() -> PositionConfig {
     }
 }
 
+/// Helper: build PositionRecord with allocated_capital=$100 for clean math.
+/// IIR = (yes_value - no_value) / allocated_capital
 fn make_position(yes_shares: f64, no_shares: f64, midpoint: f64) -> PositionRecord {
     let yes = rust_decimal::Decimal::try_from(yes_shares).unwrap();
     let no = rust_decimal::Decimal::try_from(no_shares).unwrap();
@@ -27,27 +29,32 @@ fn make_position(yes_shares: f64, no_shares: f64, midpoint: f64) -> PositionReco
         no_shares: no,
         yes_value: yes * mid,
         no_value: no * (dec!(1.0) - mid),
+        allocated_capital: dec!(100),
         updated_at: chrono::Utc::now(),
     }
 }
 
 #[test]
 fn test_iir_calculation() {
-    // Balanced position
+    // Balanced position: (50 - 50) / 100 = 0
     let pos = make_position(100.0, 100.0, 0.5);
-    assert_eq!(pos.iir(), dec!(0)); // 50 - 50 / 100 = 0
+    assert_eq!(pos.iir(), dec!(0));
 
-    // All YES
+    // All YES: capital-based → 50/100 = 0.5
     let pos_yes = make_position(100.0, 0.0, 0.5);
-    assert_eq!(pos_yes.iir(), dec!(1)); // 50 - 0 / 50 = 1
+    assert_eq!(pos_yes.iir(), dec!(0.5));
 
-    // All NO
+    // All NO: capital-based → -50/100 = -0.5
     let pos_no = make_position(0.0, 100.0, 0.5);
-    assert_eq!(pos_no.iir(), dec!(-1)); // 0 - 50 / 50 = -1
+    assert_eq!(pos_no.iir(), dec!(-0.5));
 
     // Empty position
     let pos_empty = make_position(0.0, 0.0, 0.5);
     assert_eq!(pos_empty.iir(), dec!(0));
+
+    // Clamping: 150/100 = 1.5, clamped to 1.0
+    let pos_over = make_position(300.0, 0.0, 0.5);
+    assert_eq!(pos_over.iir(), dec!(1));
 }
 
 #[test]
@@ -68,8 +75,8 @@ fn test_balanced_position_no_action() {
 #[test]
 fn test_light_imbalance_skew() {
     let manager = PositionManager::new(&test_position_config());
-    // IIR = (60-40)/(60+40) = 0.2 (light, between 0.05 and 0.3)
-    let pos = make_position(120.0, 80.0, 0.5);
+    // IIR = 20/100 = 0.2 (light, between 0.05 and 0.3)
+    let pos = make_position(40.0, 0.0, 0.5);
 
     let actions = manager.evaluate(&pos);
 
@@ -83,8 +90,8 @@ fn test_light_imbalance_skew() {
 #[test]
 fn test_medium_imbalance_reduces_size() {
     let manager = PositionManager::new(&test_position_config());
-    // IIR = (100-40)/(100+40) ≈ 0.43 (medium, between 0.3 and 0.5)
-    let pos = make_position(200.0, 80.0, 0.5);
+    // IIR = (60-20)/100 = 0.4 (medium, between 0.3 and 0.5)
+    let pos = make_position(120.0, 40.0, 0.5);
 
     let actions = manager.evaluate(&pos);
 
@@ -98,8 +105,8 @@ fn test_medium_imbalance_reduces_size() {
 #[test]
 fn test_high_imbalance_escalates_l2() {
     let manager = PositionManager::new(&test_position_config());
-    // IIR ≈ 0.6 (high imbalance, >= 0.5)
-    let pos = make_position(400.0, 80.0, 0.5);
+    // IIR = 60/100 = 0.6 (high imbalance, >= 0.5)
+    let pos = make_position(120.0, 0.0, 0.5);
 
     let actions = manager.evaluate(&pos);
 
@@ -113,8 +120,8 @@ fn test_high_imbalance_escalates_l2() {
 #[test]
 fn test_extreme_imbalance_escalates_l3() {
     let manager = PositionManager::new(&test_position_config());
-    // IIR ≈ 0.8 (extreme, >= 0.75)
-    let pos = make_position(500.0, 30.0, 0.5);
+    // IIR = 80/100 = 0.8 (extreme, >= 0.75)
+    let pos = make_position(160.0, 0.0, 0.5);
 
     let actions = manager.evaluate(&pos);
 

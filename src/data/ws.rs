@@ -34,23 +34,35 @@ pub async fn run_market_ws(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| anyhow::anyhow!("Invalid token_id: {e}"))?;
 
+    let mut backoff_secs = 1u64;
+    const MAX_BACKOFF_SECS: u64 = 30;
+
     loop {
-        match run_market_ws_inner(&state, &asset_ids).await {
-            Ok(()) => {
-                info!("Market WebSocket closed normally, reconnecting...");
+        let was_connected = match run_market_ws_inner(&state, &asset_ids).await {
+            Ok(connected) => {
+                info!("Market WebSocket closed normally, reconnecting in {backoff_secs}s...");
+                connected
             }
             Err(e) => {
-                error!("Market WebSocket error: {e:#}, reconnecting in 5s...");
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                error!("Market WebSocket error: {e:#}, reconnecting in {backoff_secs}s...");
+                false
             }
+        };
+        // Reset backoff if connection was successfully established
+        if was_connected {
+            backoff_secs = 1;
         }
+        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+        backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
     }
 }
 
+/// Returns Ok(true) if at least one message was received (connection was live),
+/// Ok(false) if closed before any data, Err on stream error.
 async fn run_market_ws_inner(
     state: &SharedState,
     asset_ids: &[U256],
-) -> Result<()> {
+) -> Result<bool> {
     let client = sdk_ws::Client::default();
     let stream = client.subscribe_orderbook(asset_ids.to_vec())?;
     let mut stream = Box::pin(stream);
@@ -63,9 +75,13 @@ async fn run_market_ws_inner(
         *last_msg = Utc::now();
     }
 
+    let mut received_any = false;
+
     while let Some(result) = stream.next().await {
         match result {
             Ok(book) => {
+                received_any = true;
+
                 // Update heartbeat timestamp
                 {
                     let mut last_msg = state.ws_last_message.write().await;
@@ -109,7 +125,7 @@ async fn run_market_ws_inner(
         }
     }
 
-    Ok(())
+    Ok(received_any)
 }
 
 /// Run user events WebSocket using the SDK.
@@ -123,25 +139,35 @@ pub async fn run_user_ws(
 ) -> Result<()> {
     info!("User WebSocket starting for address={address}");
 
+    let mut backoff_secs = 1u64;
+    const MAX_BACKOFF_SECS: u64 = 30;
+
     loop {
-        match run_user_ws_inner(&state, &credentials, address, &risk_controller).await {
-            Ok(()) => {
-                info!("User WebSocket closed normally, reconnecting...");
+        let was_connected = match run_user_ws_inner(&state, &credentials, address, &risk_controller).await {
+            Ok(connected) => {
+                info!("User WebSocket closed normally, reconnecting in {backoff_secs}s...");
+                connected
             }
             Err(e) => {
-                error!("User WebSocket error: {e:#}, reconnecting in 5s...");
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                error!("User WebSocket error: {e:#}, reconnecting in {backoff_secs}s...");
+                false
             }
+        };
+        if was_connected {
+            backoff_secs = 1;
         }
+        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+        backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
     }
 }
 
+/// Returns Ok(true) if at least one message was received, Ok(false) otherwise.
 async fn run_user_ws_inner(
     state: &SharedState,
     credentials: &Credentials,
     address: Address,
     risk_controller: &Arc<tokio::sync::Mutex<RiskController>>,
-) -> Result<()> {
+) -> Result<bool> {
     let client = sdk_ws::Client::default()
         .authenticate(credentials.clone(), address)?;
 
@@ -152,7 +178,10 @@ async fn run_user_ws_inner(
 
     info!("User WebSocket connected and authenticated");
 
+    let mut received_any = false;
+
     while let Some(event) = stream.next().await {
+        received_any = true;
         match event {
             Ok(WsMessage::Order(order)) => {
                 let order_id = order.id.to_string();
@@ -196,7 +225,10 @@ async fn run_user_ws_inner(
                     polymarket_client_sdk::clob::types::Side::Sell => {
                         crate::data::state::OrderSide::Sell
                     }
-                    _ => crate::data::state::OrderSide::Buy,
+                    other => {
+                        warn!("Unknown trade side {:?} for trade {}, skipping", other, trade.id);
+                        continue;
+                    }
                 };
 
                 // Record PnL
@@ -244,5 +276,5 @@ async fn run_user_ws_inner(
         }
     }
 
-    Ok(())
+    Ok(received_any)
 }

@@ -119,18 +119,26 @@ pub struct PositionRecord {
     pub yes_value: Decimal,
     /// USDC-denominated value of NO position
     pub no_value: Decimal,
+    /// Allocated capital for this market (USDC), used for IIR normalization
+    pub allocated_capital: Decimal,
     pub updated_at: DateTime<Utc>,
 }
 
 impl PositionRecord {
-    /// Inventory Imbalance Ratio: (yes_value - no_value) / (yes_value + no_value)
+    /// Inventory Imbalance Ratio: net_exposure / allocated_capital
     /// Range: [-1.0, +1.0], positive means holding too much YES
+    ///
+    /// Uses capital-based normalization instead of (yes-no)/(yes+no)
+    /// because MVP only trades YES tokens, so no_value is typically 0.
+    /// The symmetric formula would always yield IIR=1.0 in that case.
     pub fn iir(&self) -> Decimal {
-        let total = self.yes_value + self.no_value;
-        if total.is_zero() {
+        if self.allocated_capital.is_zero() {
             return Decimal::ZERO;
         }
-        (self.yes_value - self.no_value) / total
+        let net_exposure = self.yes_value - self.no_value;
+        let ratio = net_exposure / self.allocated_capital;
+        // Clamp to [-1.0, +1.0]
+        ratio.min(Decimal::ONE).max(-Decimal::ONE)
     }
 
     /// Minimum of YES and NO shares (available for merge)
@@ -150,6 +158,8 @@ impl SharedState {
         let market_states = Arc::new(DashMap::new());
         let positions = Arc::new(DashMap::new());
         let token_to_market = Arc::new(DashMap::new());
+
+        let per_market_capital = config.per_market_capital();
 
         // Pre-populate markets and build token→market mapping
         for market in &config.markets {
@@ -173,6 +183,7 @@ impl SharedState {
                     no_shares: Decimal::ZERO,
                     yes_value: Decimal::ZERO,
                     no_value: Decimal::ZERO,
+                    allocated_capital: per_market_capital,
                     updated_at: Utc::now(),
                 },
             );
@@ -224,21 +235,20 @@ impl SharedState {
         }
     }
 
-    /// Record a new price point
+    /// Record a new price point (single lock: entry → push + retain)
     pub fn record_price(&self, market_id: &str, price: Decimal) {
-        self.price_history
+        let mut entry = self.price_history
             .entry(market_id.to_string())
-            .or_default()
-            .push(PricePoint {
-                price,
-                timestamp: Utc::now(),
-            });
+            .or_default();
 
-        // Keep only last 30 minutes of history
+        entry.push(PricePoint {
+            price,
+            timestamp: Utc::now(),
+        });
+
+        // Keep only last 30 minutes of history (same lock scope)
         let cutoff = Utc::now() - chrono::Duration::minutes(30);
-        if let Some(mut history) = self.price_history.get_mut(market_id) {
-            history.retain(|p| p.timestamp >= cutoff);
-        }
+        entry.retain(|p| p.timestamp >= cutoff);
     }
 
     /// Seconds since last WebSocket message

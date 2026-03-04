@@ -95,11 +95,13 @@ impl ClobClient {
         Ok(response.order_id)
     }
 
-    /// Submit a batch of orders. Returns vec of order IDs.
+    /// Submit a batch of orders.
+    /// Returns Vec<Option<String>> preserving index alignment with input:
+    /// Some(order_id) for accepted, None for rejected.
     pub async fn post_orders_batch(
         &self,
         orders: &[QuoteOrder],
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<Option<String>>> {
         let mut signed_orders = Vec::with_capacity(orders.len());
 
         for order in orders {
@@ -135,17 +137,18 @@ impl ClobClient {
             .await
             .context("Failed to post orders batch")?;
 
-        let mut order_ids = Vec::new();
-        for resp in responses {
+        let mut results = Vec::with_capacity(responses.len());
+        for (i, resp) in responses.iter().enumerate() {
             if resp.success {
-                order_ids.push(resp.order_id);
+                results.push(Some(resp.order_id.clone()));
             } else {
-                let err = resp.error_msg.unwrap_or_default();
-                warn!("Order in batch rejected: {err}");
+                let err = resp.error_msg.as_deref().unwrap_or("unknown");
+                warn!("Order {i} in batch rejected: {err}");
+                results.push(None);
             }
         }
 
-        Ok(order_ids)
+        Ok(results)
     }
 
     /// Cancel a single order by ID
@@ -169,19 +172,27 @@ impl ClobClient {
         Ok(())
     }
 
-    /// Fetch all open orders (paginated). Returns a flat list.
+    /// Fetch all open orders (paginated with safety limit). Returns a flat list.
     pub async fn fetch_open_orders(&self) -> Result<Vec<polymarket_client_sdk::clob::types::response::OpenOrderResponse>> {
+        const MAX_PAGES: u32 = 10;
         let mut all_orders = Vec::new();
         let mut cursor = None;
         let request = OrdersRequest::builder().build();
 
-        loop {
+        for page_num in 1..=MAX_PAGES {
             let page = self.sdk.orders(&request, cursor).await
                 .context("Failed to fetch open orders")?;
 
             all_orders.extend(page.data);
 
             if page.next_cursor.is_empty() || page.next_cursor == "LTE=" {
+                break;
+            }
+            if page_num == MAX_PAGES {
+                warn!(
+                    "fetch_open_orders hit pagination limit ({MAX_PAGES} pages), {} orders loaded so far",
+                    all_orders.len()
+                );
                 break;
             }
             cursor = Some(page.next_cursor);

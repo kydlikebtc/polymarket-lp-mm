@@ -106,6 +106,16 @@ impl RiskController {
         self.our_cancel_requests.remove(order_id).is_some()
     }
 
+    /// Remove cancel requests older than the given cutoff to prevent unbounded growth
+    pub fn prune_stale_cancels(&mut self, cutoff: DateTime<Utc>) {
+        let before = self.our_cancel_requests.len();
+        self.our_cancel_requests.retain(|_, ts| *ts >= cutoff);
+        let pruned = before - self.our_cancel_requests.len();
+        if pruned > 0 {
+            info!("Pruned {pruned} stale cancel requests");
+        }
+    }
+
     /// Record a ghost fill event
     pub fn record_ghost_fill(&mut self) {
         let now = Utc::now();
