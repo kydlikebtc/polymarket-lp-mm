@@ -117,13 +117,17 @@ impl OrderExecutor {
             sleep(Duration::from_millis(100)).await;
         }
 
-        // Update local state for any still not confirmed via WS
+        // Log warnings for any orders not yet confirmed cancelled via WS.
+        // Do NOT force-mark as Canceled — the exchange may not have processed the cancel yet.
+        // Caller (run_market_strategy) will detect still-live orders and skip submission.
         for id in &order_ids {
-            if let Some(mut order) = state.my_orders.get_mut(id) {
+            if let Some(order) = state.my_orders.get(id) {
                 if order.status != OrderStatus::Canceled {
-                    warn!("Order {id} cancel not confirmed within timeout, marking locally");
-                    order.status = OrderStatus::Canceled;
-                    order.updated_at = Utc::now();
+                    warn!(
+                        "Order {id} cancel not confirmed within timeout (status={:?}). \
+                         May still be live on exchange — skipping new order submission this round.",
+                        order.status
+                    );
                 }
             }
         }
@@ -283,6 +287,6 @@ impl OrderExecutor {
             }
         }
 
-        Ok(())
+        unreachable!("max_retries must be > 0 (validated at config load)")
     }
 }

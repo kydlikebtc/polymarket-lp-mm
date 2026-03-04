@@ -6,7 +6,7 @@ use rust_decimal::Decimal;
 use tokio::signal;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::AppConfig;
 use crate::data::SharedState;
@@ -37,7 +37,7 @@ pub async fn run_orchestrator(
     }
 
     let per_market_capital = config.per_market_capital();
-    info!("Per-market capital allocation: ${per_market_capital:.2}");
+    debug!("Per-market capital allocation: ${per_market_capital:.2}");
 
     // Load initial positions: fetch YES token balances for each market
     for market in &config.markets {
@@ -169,6 +169,16 @@ pub async fn run_orchestrator(
         tokio::select! {
             // Strategy tick (every 10 seconds)
             _ = strategy_tick.tick() => {
+                // Skip strategy until both WS connections have received at least one message.
+                // Before WS connects, midpoints are default (0.50) and may be wildly wrong.
+                let market_ws_gap = state.ws_disconnect_secs().await;
+                let user_ws_gap = state.user_ws_disconnect_secs().await;
+                let startup_elapsed = strategy_tick.period().as_secs(); // first tick is immediate
+                if market_ws_gap > startup_elapsed + 5 || user_ws_gap > startup_elapsed + 5 {
+                    debug!("Waiting for WS connections (market_gap={market_ws_gap}s, user_gap={user_ws_gap}s)");
+                    continue;
+                }
+
                 let risk_level = evaluate_risk(
                     &risk_controller,
                     &state,
@@ -306,7 +316,7 @@ async fn evaluate_risk(
         })
         .collect();
 
-    let ws_disconnect = state.ws_disconnect_secs().await;
+    let ws_disconnect = state.max_ws_disconnect_secs().await;
 
     // Sync daily PnL to risk controller before evaluation
     let daily_pnl = {
@@ -407,7 +417,7 @@ async fn run_market_strategy(
 
     // Safety check: verify WS is still connected before submitting new orders.
     // If WS is down, we won't receive fill/cancel confirmations, risking double exposure.
-    let ws_gap = state.ws_disconnect_secs().await;
+    let ws_gap = state.max_ws_disconnect_secs().await;
     if ws_gap > 10 {
         warn!(
             "WS stale for {ws_gap}s, skipping order submission for market={market_id} to avoid blind exposure"
@@ -474,9 +484,10 @@ async fn handle_position_action(
         PositionAction::EscalateL2 { market_id, iir } => {
             warn!("Position escalation to L2 from PositionManager: market={market_id}, IIR={iir}");
             let mut rc = risk_controller.lock().await;
-            let iirs = vec![(market_id.clone(), *iir)];
-            let prices = vec![(market_id.clone(), Decimal::ZERO)];
-            rc.evaluate(&iirs, &prices, 0);
+            rc.force_l2(crate::risk::RiskTrigger::IirExceeded {
+                market_id: market_id.clone(),
+                iir: *iir,
+            });
         }
         PositionAction::EscalateL3 { market_id, iir } => {
             warn!("Position escalation to L3 from PositionManager: market={market_id}, IIR={iir}");

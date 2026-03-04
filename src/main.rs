@@ -1,16 +1,10 @@
-mod config;
-mod data;
-mod execution;
-mod monitor;
-mod position;
-mod pricing;
-mod risk;
-
 use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::sync::Mutex;
 use tracing::{error, info};
+
+use polymarket_mm::{config, data, execution, monitor, position, pricing, risk};
 
 #[tokio::main]
 async fn main() -> Result<()> {

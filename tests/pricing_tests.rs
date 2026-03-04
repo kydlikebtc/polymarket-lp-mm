@@ -29,6 +29,7 @@ fn test_pricing_config() -> PricingConfig {
         skew_factor: dec!(0.02),
         requote_threshold: dec!(0.005),
         requote_interval_secs: 30,
+        baseline_volatility: dec!(0.025),
     }
 }
 

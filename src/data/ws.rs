@@ -50,12 +50,14 @@ pub async fn run_market_ws(
                 false
             }
         };
-        // Reset backoff if connection was successfully established
+        // Reset backoff on successful connection; exponential increase only on failure
         if was_connected {
             backoff_secs = 1;
         }
         tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-        backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
+        if !was_connected {
+            backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
+        }
     }
 }
 
@@ -139,7 +141,7 @@ pub async fn run_user_ws(
     address: Address,
     risk_controller: Arc<tokio::sync::Mutex<RiskController>>,
 ) -> Result<()> {
-    info!("User WebSocket starting for address={address}");
+    debug!("User WebSocket starting for address={address}");
 
     let mut backoff_secs = 1u64;
     const MAX_BACKOFF_SECS: u64 = 30;
@@ -159,7 +161,9 @@ pub async fn run_user_ws(
             backoff_secs = 1;
         }
         tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-        backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
+        if !was_connected {
+            backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
+        }
     }
 }
 
@@ -184,6 +188,13 @@ async fn run_user_ws_inner(
 
     while let Some(event) = stream.next().await {
         received_any = true;
+
+        // Update user WS heartbeat for disconnect detection
+        {
+            let mut last_msg = state.user_ws_last_message.write().await;
+            *last_msg = Utc::now();
+        }
+
         match event {
             Ok(WsMessage::Order(order)) => {
                 let order_id = order.id.to_string();
@@ -260,6 +271,11 @@ async fn run_user_ws_inner(
                     );
                 }
 
+                // Read midpoint BEFORE acquiring positions write lock
+                // to avoid cross-lock deadlock with monitor (which does market_states → positions)
+                let current_midpoint = state.market_states.get(&resolved)
+                    .map(|ms| ms.midpoint);
+
                 if let Some(mut pos) = state.positions.get_mut(&resolved) {
                     match our_side {
                         crate::data::state::OrderSide::Buy => {
@@ -269,11 +285,10 @@ async fn run_user_ws_inner(
                             pos.yes_shares = (pos.yes_shares - trade.size).max(Decimal::ZERO);
                         }
                     }
-                    // Immediately recalculate yes_value using current midpoint
-                    // so IIR reflects the fill without waiting for position_tick
-                    if let Some(ms) = state.market_states.get(&resolved) {
-                        pos.yes_value = pos.yes_shares * ms.midpoint;
-                        pos.no_value = pos.no_shares * (Decimal::ONE - ms.midpoint);
+                    // Recalculate values with pre-read midpoint (no nested DashMap access)
+                    if let Some(mid) = current_midpoint {
+                        pos.yes_value = pos.yes_shares * mid;
+                        pos.no_value = pos.no_shares * (Decimal::ONE - mid);
                     }
                     pos.updated_at = Utc::now();
                 }

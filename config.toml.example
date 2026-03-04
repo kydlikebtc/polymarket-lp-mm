@@ -38,6 +38,7 @@ vaf_max = "5.0"
 skew_factor = "0.02"                # IIR → price shift
 requote_threshold = "0.005"         # 0.5 cents triggers re-quote
 requote_interval_secs = 30          # Timer fallback
+baseline_volatility = "0.025"       # 2.5% daily baseline for VAF normalization
 
 # Ladder layers: [distance, capital_fraction_per_side]
 [[pricing.layers]]

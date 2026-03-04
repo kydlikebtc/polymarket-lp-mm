@@ -39,7 +39,8 @@ impl ClobClient {
     /// Verify API connectivity by fetching USDC balance
     pub async fn check_connection(&self) -> Result<Decimal> {
         let balance = self.fetch_collateral_balance().await?;
-        info!("CLOB API authenticated, USDC balance: ${balance}");
+        info!("CLOB API authenticated OK");
+        debug!("USDC balance: ${balance}");
         Ok(balance)
     }
 
@@ -211,7 +212,7 @@ impl ClobClient {
         let resp = self.sdk.balance_allowance(req).await
             .context("Failed to fetch collateral balance")?;
 
-        info!("USDC balance: {}", resp.balance);
+        debug!("USDC balance: {}", resp.balance);
         Ok(resp.balance)
     }
 

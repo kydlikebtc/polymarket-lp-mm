@@ -152,9 +152,7 @@ impl PricingEngine {
 
         let recent_vol = compute_std_dev(&recent_prices);
 
-        // Baseline volatility: use 0.025 as default (2.5% daily)
-        // In production, this should be calculated from 7-day history
-        let baseline_vol = dec!(0.025);
+        let baseline_vol = self.config.baseline_volatility;
 
         if baseline_vol.is_zero() {
             return dec!(1.0);

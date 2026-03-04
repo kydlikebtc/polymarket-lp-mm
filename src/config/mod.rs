@@ -53,6 +53,8 @@ pub struct PricingConfig {
     pub requote_threshold: Decimal,
     /// Timer-based re-quote interval in seconds
     pub requote_interval_secs: u64,
+    /// Baseline daily volatility for VAF normalization (e.g., 0.025 = 2.5%)
+    pub baseline_volatility: Decimal,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -160,6 +162,7 @@ impl AppConfig {
             self.execution.batch_size
         );
 
+        let mut total_fraction = Decimal::ZERO;
         for (i, layer) in self.pricing.layers.iter().enumerate() {
             anyhow::ensure!(
                 layer.distance > Decimal::ZERO,
@@ -169,7 +172,12 @@ impl AppConfig {
                 layer.capital_fraction > Decimal::ZERO && layer.capital_fraction <= Decimal::ONE,
                 "Layer {i} capital_fraction must be in (0, 1]"
             );
+            total_fraction += layer.capital_fraction;
         }
+        anyhow::ensure!(
+            total_fraction <= Decimal::ONE,
+            "Sum of layer capital_fractions ({total_fraction}) must be <= 1.0"
+        );
 
         // Risk parameter sanity checks
         let r = &self.risk;

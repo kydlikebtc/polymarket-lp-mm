@@ -13,7 +13,10 @@ pub struct SharedState {
     pub market_states: Arc<DashMap<String, MarketState>>,
     pub my_orders: Arc<DashMap<String, OrderRecord>>,
     pub positions: Arc<DashMap<String, PositionRecord>>,
+    /// Last message timestamp from market data WebSocket
     pub ws_last_message: Arc<RwLock<DateTime<Utc>>>,
+    /// Last message timestamp from user events WebSocket
+    pub user_ws_last_message: Arc<RwLock<DateTime<Utc>>>,
     pub price_history: Arc<DashMap<String, Vec<PricePoint>>>,
     /// Mapping: token_id → market_id (WS uses token_id, rest of system uses market_id)
     pub token_to_market: Arc<DashMap<String, String>>,
@@ -229,6 +232,7 @@ impl SharedState {
             my_orders: Arc::new(DashMap::new()),
             positions,
             ws_last_message: Arc::new(RwLock::new(Utc::now())),
+            user_ws_last_message: Arc::new(RwLock::new(Utc::now())),
             price_history: Arc::new(DashMap::new()),
             token_to_market,
             daily_pnl: Arc::new(RwLock::new(PnlTracker::new())),
@@ -286,8 +290,22 @@ impl SharedState {
     }
 
     /// Seconds since last WebSocket message
+    /// Seconds since last market data WS message
     pub async fn ws_disconnect_secs(&self) -> u64 {
         let last = *self.ws_last_message.read().await;
         (Utc::now() - last).num_seconds().max(0) as u64
+    }
+
+    /// Seconds since last user events WS message
+    pub async fn user_ws_disconnect_secs(&self) -> u64 {
+        let last = *self.user_ws_last_message.read().await;
+        (Utc::now() - last).num_seconds().max(0) as u64
+    }
+
+    /// Max disconnect seconds across both WebSocket connections
+    pub async fn max_ws_disconnect_secs(&self) -> u64 {
+        let market_secs = self.ws_disconnect_secs().await;
+        let user_secs = self.user_ws_disconnect_secs().await;
+        market_secs.max(user_secs)
     }
 }

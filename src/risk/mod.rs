@@ -147,6 +147,14 @@ impl RiskController {
         }
     }
 
+    /// Force transition to L2 Warning (for use by PositionManager escalation).
+    /// Avoids calling evaluate() with synthetic zero-price data.
+    pub fn force_l2(&mut self, trigger: RiskTrigger) {
+        if self.level == RiskLevel::L1Normal {
+            self.transition_to(RiskLevel::L2Warning, trigger);
+        }
+    }
+
     /// Force transition to L3 Emergency (for use by PositionManager escalation).
     /// Avoids calling evaluate() with synthetic zero-price data.
     pub fn force_l3(&mut self, trigger: RiskTrigger) {
@@ -170,6 +178,18 @@ impl RiskController {
     ) -> RiskLevel {
         // If already L3, only manual recovery can change it
         if self.level == RiskLevel::L3Emergency {
+            return self.level;
+        }
+
+        // Failsafe: zero capital means we cannot safely trade
+        if self.total_capital <= Decimal::ZERO {
+            warn!("total_capital is zero or negative — forcing L3 as safety measure");
+            self.transition_to(
+                RiskLevel::L3Emergency,
+                RiskTrigger::DailyLoss {
+                    loss_pct: Decimal::ONE,
+                },
+            );
             return self.level;
         }
 
