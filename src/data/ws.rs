@@ -10,7 +10,9 @@ use tokio::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use polymarket_client_sdk::auth::Credentials;
+use polymarket_client_sdk::clob::types::OrderStatusType;
 use polymarket_client_sdk::clob::ws::{self as sdk_ws, WsMessage};
+use polymarket_client_sdk::clob::ws::types::response::OrderMessageType;
 
 use super::SharedState;
 use crate::data::state::OrderStatus;
@@ -189,13 +191,21 @@ async fn run_user_ws_inner(
 
                 // Update order state
                 if let Some(mut our_order) = state.my_orders.get_mut(&order_id) {
-                    // Map SDK status to our OrderStatus
-                    // The msg_type indicates what happened to the order
-                    let new_status = match format!("{:?}", order.msg_type).as_str() {
-                        s if s.contains("Place") => OrderStatus::Live,
-                        s if s.contains("Cancel") => OrderStatus::Canceled,
-                        s if s.contains("Match") || s.contains("Fill") => OrderStatus::Matched,
-                        _ => our_order.status,
+                    // Determine new status: prefer SDK `status` field, fall back to `msg_type`
+                    let new_status = if let Some(ref sdk_status) = order.status {
+                        match sdk_status {
+                            OrderStatusType::Live => OrderStatus::Live,
+                            OrderStatusType::Matched => OrderStatus::Matched,
+                            OrderStatusType::Canceled => OrderStatus::Canceled,
+                            _ => our_order.status,
+                        }
+                    } else {
+                        match order.msg_type {
+                            Some(OrderMessageType::Placement) => OrderStatus::Live,
+                            Some(OrderMessageType::Cancellation) => OrderStatus::Canceled,
+                            Some(OrderMessageType::Update) => OrderStatus::Matched,
+                            _ => our_order.status,
+                        }
                     };
 
                     our_order.status = new_status;
@@ -255,6 +265,12 @@ async fn run_user_ws_inner(
                         crate::data::state::OrderSide::Sell => {
                             pos.yes_shares = (pos.yes_shares - trade.size).max(Decimal::ZERO);
                         }
+                    }
+                    // Immediately recalculate yes_value using current midpoint
+                    // so IIR reflects the fill without waiting for position_tick
+                    if let Some(ms) = state.market_states.get(&resolved) {
+                        pos.yes_value = pos.yes_shares * ms.midpoint;
+                        pos.no_value = pos.no_shares * ms.midpoint;
                     }
                     pos.updated_at = Utc::now();
                 }

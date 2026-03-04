@@ -381,7 +381,23 @@ async fn run_market_strategy(
     // Step 1: Cancel existing orders (lock acquired briefly inside method)
     executor.cancel_market_orders(state, market_id, risk_controller).await?;
 
+    // Safety check: verify WS is still connected before submitting new orders.
+    // If WS is down, we won't receive fill/cancel confirmations, risking double exposure.
+    let ws_gap = state.ws_disconnect_secs().await;
+    if ws_gap > 10 {
+        warn!(
+            "WS stale for {ws_gap}s, skipping order submission for market={market_id} to avoid blind exposure"
+        );
+        return Ok(());
+    }
+
     // Step 2: Generate new quotes
+    let available_yes_shares = state
+        .positions
+        .get(market_id)
+        .map(|p| p.yes_shares)
+        .unwrap_or(Decimal::ZERO);
+
     let orders = pricing_engine.generate_quotes(
         market_config,
         current_midpoint,
@@ -390,6 +406,7 @@ async fn run_market_strategy(
         tf,
         per_market_capital,
         risk_level,
+        available_yes_shares,
     );
 
     if orders.is_empty() {
@@ -441,9 +458,10 @@ async fn handle_position_action(
             warn!("Position escalation to L3 from PositionManager: market={market_id}, IIR={iir}");
             let should_cancel = {
                 let mut rc = risk_controller.lock().await;
-                let iirs = vec![(market_id.clone(), *iir)];
-                let prices = vec![(market_id.clone(), Decimal::ZERO)];
-                rc.evaluate(&iirs, &prices, 0);
+                rc.force_l3(crate::risk::RiskTrigger::IirExceeded {
+                    market_id: market_id.clone(),
+                    iir: *iir,
+                });
                 rc.level() == RiskLevel::L3Emergency
             };
             if should_cancel {

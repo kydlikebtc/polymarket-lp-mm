@@ -101,9 +101,11 @@ impl RiskController {
         self.our_cancel_requests.insert(order_id, Utc::now());
     }
 
-    /// Check if a cancel event was initiated by us
-    pub fn is_our_cancel(&mut self, order_id: &str) -> bool {
-        self.our_cancel_requests.remove(order_id).is_some()
+    /// Check if a cancel event was initiated by us.
+    /// Non-consumptive: does not remove the entry (cleaned up by prune_stale_cancels).
+    /// This prevents duplicate WS events from being misidentified as ghost fills.
+    pub fn is_our_cancel(&self, order_id: &str) -> bool {
+        self.our_cancel_requests.contains_key(order_id)
     }
 
     /// Remove cancel requests older than the given cutoff to prevent unbounded growth
@@ -116,15 +118,23 @@ impl RiskController {
         }
     }
 
-    /// Record a ghost fill event
+    /// Record a ghost fill event (capped at 1000 entries to prevent unbounded growth)
     pub fn record_ghost_fill(&mut self) {
-        let now = Utc::now();
-        self.ghost_fill_times.push(now);
+        const MAX_GHOST_FILL_ENTRIES: usize = 1000;
 
-        // Clean old entries outside the window
+        let now = Utc::now();
+
+        // Clean old entries outside the window first
         let window_start = now
             - chrono::Duration::seconds(self.config.l3_ghost_fill_window_secs as i64);
         self.ghost_fill_times.retain(|t| *t >= window_start);
+
+        // Hard cap to prevent unbounded growth under rapid ghost fill attacks
+        if self.ghost_fill_times.len() >= MAX_GHOST_FILL_ENTRIES {
+            self.ghost_fill_times.drain(..self.ghost_fill_times.len() / 2);
+        }
+
+        self.ghost_fill_times.push(now);
 
         let count = self.ghost_fill_times.len() as u32;
         warn!("Ghost fill detected! Count in window: {count}");
@@ -134,6 +144,14 @@ impl RiskController {
                 RiskLevel::L3Emergency,
                 RiskTrigger::GhostFills { count },
             );
+        }
+    }
+
+    /// Force transition to L3 Emergency (for use by PositionManager escalation).
+    /// Avoids calling evaluate() with synthetic zero-price data.
+    pub fn force_l3(&mut self, trigger: RiskTrigger) {
+        if self.level != RiskLevel::L3Emergency {
+            self.transition_to(RiskLevel::L3Emergency, trigger);
         }
     }
 

@@ -28,9 +28,9 @@ pub struct ClobClient {
     /// Signer for order signing (needed by `sdk.sign()`)
     signer: PrivateKeySigner,
     /// API credentials for WebSocket authentication
-    pub credentials: Credentials,
+    pub(crate) credentials: Credentials,
     /// Wallet address
-    pub address: alloy::primitives::Address,
+    pub(crate) address: alloy::primitives::Address,
     /// Base URL for reference
     pub base_url: String,
 }
@@ -273,7 +273,7 @@ pub async fn create_clob_client(config: &AppConfig) -> Result<ClobClient> {
     let signer = signer.with_chain_id(Some(POLYGON));
 
     let address = signer.address();
-    info!("Wallet address: {address}");
+    debug!("Wallet address: {address}");
 
     // Authenticate with SDK — builds an Authenticated<Normal> client
     let sdk = polymarket_client_sdk::clob::Client::new(

@@ -89,13 +89,12 @@ impl OrderExecutor {
             .map(|entry| entry.key().clone());
 
         // Call real API with retry (NO lock held during HTTP)
-        match &token_id {
-            Some(tid) => self.cancel_market_with_retry(tid).await?,
-            None => {
-                warn!("No token_id found for market={market_id}, using cancel_all as fallback");
-                self.client.cancel_all_orders().await?;
-            }
-        }
+        let Some(tid) = &token_id else {
+            anyhow::bail!(
+                "No token_id mapping found for market={market_id}, cannot cancel per-market orders"
+            );
+        };
+        self.cancel_market_with_retry(tid).await?;
 
         // Wait for confirmation via WebSocket (with timeout, NO lock held)
         let timeout = Duration::from_millis(self.config.cancel_confirm_timeout_ms);

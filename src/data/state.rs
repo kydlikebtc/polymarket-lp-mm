@@ -22,7 +22,10 @@ pub struct SharedState {
     pub settlement_times: Arc<DashMap<String, DateTime<Utc>>>,
 }
 
-/// Tracks realized PnL from trade events
+/// Tracks realized PnL from trade events using weighted-average cost basis.
+///
+/// Buy fills accumulate cost basis; Sell fills realize PnL against average cost.
+/// This gives economically correct realized PnL rather than raw cash-flow accounting.
 #[derive(Debug, Clone)]
 pub struct PnlTracker {
     /// Cumulative realized PnL for the current day (USDC)
@@ -31,6 +34,10 @@ pub struct PnlTracker {
     pub date: chrono::NaiveDate,
     /// Number of fills tracked
     pub fill_count: u64,
+    /// Weighted-average cost per share (for YES tokens held)
+    avg_cost: Decimal,
+    /// Total shares held (cost basis applies to)
+    shares_held: Decimal,
 }
 
 impl PnlTracker {
@@ -39,23 +46,43 @@ impl PnlTracker {
             realized_pnl: Decimal::ZERO,
             date: Utc::now().date_naive(),
             fill_count: 0,
+            avg_cost: Decimal::ZERO,
+            shares_held: Decimal::ZERO,
         }
     }
 
-    /// Record a fill. For maker: BUY → spent USDC (negative), SELL → received USDC (positive)
+    /// Record a fill using weighted-average cost basis.
+    ///
+    /// BUY: increases position, updates average cost.
+    /// SELL: realizes PnL = (sell_price - avg_cost) * size.
     pub fn record_fill(&mut self, side: OrderSide, price: Decimal, size: Decimal) {
         let today = Utc::now().date_naive();
         if today != self.date {
-            // Day rolled over — reset
+            // Day rolled over — reset PnL but keep cost basis for overnight positions
             self.realized_pnl = Decimal::ZERO;
             self.date = today;
             self.fill_count = 0;
         }
 
-        let cash_flow = price * size;
         match side {
-            OrderSide::Buy => self.realized_pnl -= cash_flow,  // spent USDC
-            OrderSide::Sell => self.realized_pnl += cash_flow, // received USDC
+            OrderSide::Buy => {
+                // Update weighted-average cost: new_avg = (old_cost * old_shares + price * size) / (old_shares + size)
+                let total_cost = self.avg_cost * self.shares_held + price * size;
+                self.shares_held += size;
+                if self.shares_held > Decimal::ZERO {
+                    self.avg_cost = total_cost / self.shares_held;
+                }
+            }
+            OrderSide::Sell => {
+                // Realize PnL against average cost
+                let pnl = (price - self.avg_cost) * size;
+                self.realized_pnl += pnl;
+                self.shares_held = (self.shares_held - size).max(Decimal::ZERO);
+                // avg_cost stays the same for remaining shares
+                if self.shares_held.is_zero() {
+                    self.avg_cost = Decimal::ZERO;
+                }
+            }
         }
         self.fill_count += 1;
     }

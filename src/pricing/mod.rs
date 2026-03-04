@@ -41,6 +41,7 @@ impl PricingEngine {
         tf: Decimal,
         per_market_capital: Decimal,
         risk_level: RiskLevel,
+        available_yes_shares: Decimal,
     ) -> Vec<QuoteOrder> {
         let mut orders = Vec::new();
 
@@ -53,6 +54,9 @@ impl PricingEngine {
 
         // Quote skewing: shift both bid and ask in same direction
         let skew = self.compute_skew(iir);
+
+        // Track remaining sellable inventory across all layers
+        let mut remaining_ask_shares = available_yes_shares;
 
         for (i, layer) in self.config.layers.iter().enumerate() {
             let effective_distance = layer.distance * vaf * tf * spread_mult;
@@ -72,11 +76,14 @@ impl PricingEngine {
             } else {
                 Decimal::ZERO
             };
-            let ask_size = if ask_price > Decimal::ZERO {
+            let raw_ask_size = if ask_price > Decimal::ZERO {
                 (layer_capital / ask_price).round_dp(2)
             } else {
                 Decimal::ZERO
             };
+
+            // Clamp ask_size to available YES shares to prevent selling more than we own
+            let ask_size = raw_ask_size.min(remaining_ask_shares).max(Decimal::ZERO);
 
             if bid_size > Decimal::ZERO {
                 orders.push(QuoteOrder {
@@ -98,6 +105,7 @@ impl PricingEngine {
                     size: ask_size,
                     layer: i,
                 });
+                remaining_ask_shares -= ask_size;
             }
         }
 

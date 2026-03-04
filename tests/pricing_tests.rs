@@ -55,6 +55,7 @@ fn test_generate_quotes_l1_normal() {
         dec!(1.0),      // tf (normal)
         dec!(500.0),    // per-market capital
         RiskLevel::L1Normal,
+        dec!(10000.0),  // available YES shares (large, not limiting)
     );
 
     // 3 layers × 2 sides = 6 orders
@@ -105,6 +106,7 @@ fn test_no_orders_in_l3() {
         dec!(1.0),
         dec!(500.0),
         RiskLevel::L3Emergency,
+        dec!(10000.0),
     );
 
     assert!(orders.is_empty(), "L3 should produce zero orders");
@@ -117,12 +119,12 @@ fn test_l2_reduces_size_and_widens_spread() {
 
     let l1_orders = engine.generate_quotes(
         &market, dec!(0.50), dec!(0.0), dec!(1.0), dec!(1.0),
-        dec!(500.0), RiskLevel::L1Normal,
+        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0),
     );
 
     let l2_orders = engine.generate_quotes(
         &market, dec!(0.50), dec!(0.0), dec!(1.0), dec!(1.0),
-        dec!(500.0), RiskLevel::L2Warning,
+        dec!(500.0), RiskLevel::L2Warning, dec!(10000.0),
     );
 
     // L2 should have same number of orders but smaller sizes
@@ -161,13 +163,13 @@ fn test_skewing_with_positive_iir() {
     // Balanced
     let balanced = engine.generate_quotes(
         &market, dec!(0.50), dec!(0.0), dec!(1.0), dec!(1.0),
-        dec!(500.0), RiskLevel::L1Normal,
+        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0),
     );
 
     // Positive IIR (holding too much YES) → prices shift down
     let skewed = engine.generate_quotes(
         &market, dec!(0.50), dec!(0.6), dec!(1.0), dec!(1.0),
-        dec!(500.0), RiskLevel::L1Normal,
+        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0),
     );
 
     let balanced_inner_ask = balanced.iter()
@@ -194,7 +196,7 @@ fn test_qscore_estimation() {
 
     let orders = engine.generate_quotes(
         &market, dec!(0.50), dec!(0.0), dec!(1.0), dec!(1.0),
-        dec!(500.0), RiskLevel::L1Normal,
+        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0),
     );
 
     let q = engine.estimate_qscore(&orders, dec!(0.50), dec!(0.03));
@@ -240,7 +242,7 @@ fn test_prices_within_bounds() {
     for midpoint in [dec!(0.02), dec!(0.05), dec!(0.50), dec!(0.95), dec!(0.98)] {
         let orders = engine.generate_quotes(
             &market, midpoint, dec!(0.0), dec!(1.0), dec!(1.0),
-            dec!(500.0), RiskLevel::L1Normal,
+            dec!(500.0), RiskLevel::L1Normal, dec!(10000.0),
         );
 
         for order in &orders {
