@@ -7,7 +7,6 @@ use crate::data::state::{OrderSide, SharedState};
 use crate::risk::RiskLevel;
 
 /// A single order to be placed
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct QuoteOrder {
     pub market_id: String,
@@ -150,6 +149,16 @@ impl PricingEngine {
     }
 
     /// Compute Volatility Adjustment Factor (VAF)
+    ///
+    /// Known limitations (documented, accepted for MVP):
+    /// - R7-CQ6: Sampling bias — WS messages are non-uniform in frequency.
+    ///   Price points are recorded per-message, not at fixed intervals.
+    ///   This means volatile periods (more WS updates) are over-represented.
+    /// - R7-BL4: Dimension mismatch — we compute price std dev (not return volatility)
+    ///   over 1h (not daily), then divide by baseline_volatility (calibrated as daily vol).
+    ///   This is intentionally a rough approximation; precise calibration would require
+    ///   returns-based calculation and time-scaling (√T), which adds complexity
+    ///   without meaningful improvement for binary market spreads.
     pub fn compute_vaf(&self, state: &SharedState, market_id: &str) -> Decimal {
         let history = state.price_history.get(market_id);
         let Some(history) = history else {
@@ -159,7 +168,7 @@ impl PricingEngine {
         let now = chrono::Utc::now();
 
         // Recent volatility: std dev of 1-hour 5-min intervals
-        let one_hour_ago = now - chrono::Duration::hours(1);
+        let one_hour_ago = now - chrono::TimeDelta::hours(1);
         let recent_prices: Vec<Decimal> = history
             .iter()
             .filter(|p| p.timestamp >= one_hour_ago)

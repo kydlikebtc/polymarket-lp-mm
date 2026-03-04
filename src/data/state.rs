@@ -42,6 +42,13 @@ struct MarketCostBasis {
 ///
 /// Each market maintains an independent cost basis. Buy fills accumulate cost basis;
 /// Sell fills realize PnL = (sell_price - avg_cost) * size against that market's basis.
+///
+/// R7-BL2: Known limitation — cost basis may drift over long runs due to:
+/// 1. Startup seeding with approximate midpoint (0.50) for existing positions
+/// 2. No periodic recalibration against actual on-chain balances
+/// 3. Missed WS fill events (rare but possible during reconnection)
+/// For MVP, this is acceptable since PnL is used for risk thresholds (relative),
+/// not for accounting (absolute). Consider periodic recalibration in production.
 #[derive(Debug, Clone)]
 pub struct PnlTracker {
     /// Cumulative realized PnL for the current day across all markets (USDC)
@@ -108,7 +115,6 @@ impl PnlTracker {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct MarketState {
     pub market_id: String,
@@ -120,7 +126,6 @@ pub struct MarketState {
     pub updated_at: DateTime<Utc>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct OrderRecord {
     pub order_id: String,
@@ -148,7 +153,6 @@ impl std::fmt::Display for OrderSide {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderStatus {
     Pending,
@@ -266,7 +270,7 @@ impl SharedState {
         };
 
         let now = Utc::now();
-        let five_min_ago = now - chrono::Duration::minutes(5);
+        let five_min_ago = now - chrono::TimeDelta::minutes(5);
 
         let recent: Vec<&PricePoint> = history
             .iter()
@@ -297,7 +301,7 @@ impl SharedState {
         });
 
         // Keep only last 60 minutes of history (matches compute_vaf 1-hour window)
-        let cutoff = Utc::now() - chrono::Duration::minutes(60);
+        let cutoff = Utc::now() - chrono::TimeDelta::minutes(60);
         entry.retain(|p| p.timestamp >= cutoff);
 
         // Hard cap to prevent unbounded growth from high-frequency feeds

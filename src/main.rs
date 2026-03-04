@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::Mutex;
 use tracing::{error, info};
+use zeroize::Zeroize;
 
 use polymarket_mm::{config, data, execution, monitor, position, pricing, risk};
 
@@ -24,6 +25,7 @@ fn read_and_clear_secrets() -> Result<(String, String, String, String)> {
         std::env::remove_var("POLYMARKET_PRIVATE_KEY");
         std::env::remove_var("POLYMARKET_API_SECRET");
         std::env::remove_var("POLYMARKET_API_PASSPHRASE");
+        std::env::remove_var("POLYMARKET_API_KEY");
     }
 
     Ok((api_key, api_secret, api_passphrase, private_key))
@@ -55,10 +57,10 @@ fn main() -> Result<()> {
 }
 
 async fn async_main(
-    api_key: String,
-    api_secret: String,
-    api_passphrase: String,
-    private_key: String,
+    mut api_key: String,
+    mut api_secret: String,
+    mut api_passphrase: String,
+    mut private_key: String,
 ) -> Result<()> {
     // Step 1: Load configuration
     let app_config = config::AppConfig::load()?;
@@ -72,15 +74,22 @@ async fn async_main(
     let state = data::SharedState::new(&app_config);
     info!("Shared state initialized");
 
-    // Step 3: Validate API connection (secrets consumed here, then dropped)
+    // Step 3: Validate API connection (secrets consumed here, then zeroized)
     let clob_client = data::rest::create_clob_client(
         &app_config,
-        api_key,
-        api_secret,
-        api_passphrase,
-        private_key,
+        api_key.clone(),
+        api_secret.clone(),
+        api_passphrase.clone(),
+        private_key.clone(),
     ).await?;
-    info!("CLOB API connection validated");
+
+    // R7-SEC2: Zeroize secret strings immediately after they're consumed by the SDK.
+    // Prevents secrets from lingering in freed heap memory (core dump / memory scan risk).
+    api_key.zeroize();
+    api_secret.zeroize();
+    api_passphrase.zeroize();
+    private_key.zeroize();
+    info!("CLOB API connection validated, secrets zeroized");
 
     // Step 4: Initialize risk controller (shared via Arc<Mutex> for WS access)
     let risk_controller = Arc::new(Mutex::new(risk::RiskController::new(&app_config.risk)));

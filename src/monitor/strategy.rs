@@ -58,7 +58,14 @@ pub async fn evaluate_risk(
     rc.evaluate(&market_iirs, &price_changes, ws_disconnect)
 }
 
-/// Run strategy for a single market
+/// Run strategy for a single market.
+///
+/// R7-SEC5: Known TOCTOU window — between cancel confirmation (step 1) and
+/// order submission (step 3), WS may disconnect or new fills may arrive.
+/// The WS gap check (10s threshold) at step 2.5 mitigates stale-data risk,
+/// but a brief window remains where conditions can change. This is inherent
+/// to the cancel-then-quote architecture; a fully atomic approach would
+/// require exchange-level replace-order support (not available on Polymarket).
 pub async fn run_market_strategy(
     market_id: &str,
     config: &AppConfig,

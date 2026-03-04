@@ -38,6 +38,7 @@ anyhow = "1.0"
 # Utils
 uuid = { version = "1.21", features = ["v4"] }
 dashmap = "6.1"
+zeroize = "1"
 
 [dev-dependencies]
 tokio-test = "0.4"

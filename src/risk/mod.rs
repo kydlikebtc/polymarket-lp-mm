@@ -24,7 +24,6 @@ impl std::fmt::Display for RiskLevel {
 }
 
 /// Reason for risk level change
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum RiskTrigger {
     IirExceeded { market_id: String, iir: Decimal },
@@ -101,7 +100,7 @@ impl RiskController {
         const MAX_CANCEL_ENTRIES: usize = 5000;
         if self.our_cancel_requests.len() >= MAX_CANCEL_ENTRIES {
             // Emergency prune: remove oldest half
-            let cutoff = Utc::now() - chrono::Duration::minutes(2);
+            let cutoff = Utc::now() - chrono::TimeDelta::minutes(2);
             self.our_cancel_requests.retain(|_, ts| *ts >= cutoff);
         }
         self.our_cancel_requests.insert(order_id, Utc::now());
@@ -132,7 +131,7 @@ impl RiskController {
 
         // Clean old entries outside the window first
         let window_start = now
-            - chrono::Duration::seconds(self.config.l3_ghost_fill_window_secs as i64);
+            - chrono::TimeDelta::seconds(self.config.l3_ghost_fill_window_secs as i64);
         self.ghost_fill_times.retain(|t| *t >= window_start);
 
         // Hard cap to prevent unbounded growth under rapid ghost fill attacks
@@ -240,7 +239,9 @@ impl RiskController {
         // L2 timeout → L3
         if self.level == RiskLevel::L2Warning {
             if let Some(entered_at) = self.l2_entered_at {
-                let duration = (Utc::now() - entered_at).num_seconds() as u64;
+                // R7-SEC3: Use .max(0) to prevent negative duration from clock skew
+                // (NTP correction) wrapping to a huge u64, which would falsely trigger L3.
+                let duration = (Utc::now() - entered_at).num_seconds().max(0) as u64;
                 if duration >= self.config.l2_timeout_to_l3_secs {
                     self.transition_to(
                         RiskLevel::L3Emergency,
@@ -339,7 +340,8 @@ impl RiskController {
                     info!("L2 recovery conditions met, starting hold period");
                 }
                 Some(started) => {
-                    let hold_secs = (Utc::now() - started).num_seconds() as u64;
+                    // R7-SEC3: Guard against negative duration from clock skew
+                    let hold_secs = (Utc::now() - started).num_seconds().max(0) as u64;
                     if hold_secs >= self.config.l2_recovery_hold_secs {
                         self.transition_to(
                             RiskLevel::L1Normal,
@@ -358,7 +360,6 @@ impl RiskController {
     }
 
     /// Manual recovery from L3 (must be called by human operator)
-    #[allow(dead_code)]
     pub fn manual_recover(&mut self) {
         if self.level == RiskLevel::L3Emergency {
             self.transition_to(RiskLevel::L1Normal, RiskTrigger::ManualRecovery);

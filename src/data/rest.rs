@@ -21,7 +21,6 @@ use crate::data::state::OrderSide;
 use crate::pricing::QuoteOrder;
 
 /// Authenticated CLOB client wrapping `polymarket-client-sdk`.
-#[allow(dead_code)]
 pub struct ClobClient {
     /// Authenticated SDK client (Normal L2 auth)
     sdk: polymarket_client_sdk::clob::Client<Authenticated<Normal>>,
@@ -46,7 +45,6 @@ impl ClobClient {
 
     /// Submit a single limit order via the SDK.
     /// Returns the order_id assigned by the exchange.
-    #[allow(dead_code)]
     pub async fn post_limit_order(
         &self,
         token_id: &str,
@@ -153,7 +151,6 @@ impl ClobClient {
     }
 
     /// Cancel a single order by ID
-    #[allow(dead_code)]
     pub async fn cancel_order(&self, order_id: &str) -> Result<()> {
         let resp = self.sdk
             .cancel_order(order_id)

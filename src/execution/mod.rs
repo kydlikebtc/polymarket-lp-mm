@@ -166,10 +166,36 @@ impl OrderExecutor {
         self.client.cancel_all_orders().await?;
 
         info!("API cancel-all succeeded for {} orders", all_order_ids.len());
+
+        // R7-BL3: Brief WS confirmation wait (500ms) for consistency with cancel_market_orders.
+        // In L3 emergency, speed is paramount — we use a short timeout and proceed regardless.
+        // Orders are marked Canceled locally after the wait, whether confirmed by WS or not.
+        let brief_timeout = Duration::from_millis(500);
+        let start = std::time::Instant::now();
+        while start.elapsed() < brief_timeout {
+            let all_cancelled = all_order_ids.iter().all(|id| {
+                state
+                    .my_orders
+                    .get(id)
+                    .map(|o| o.status == OrderStatus::Canceled)
+                    .unwrap_or(true)
+            });
+            if all_cancelled {
+                debug!("All cancel-all orders confirmed via WS within timeout");
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+
+        // Force-mark any unconfirmed orders as Canceled locally.
+        // In L3 emergency, we cannot wait indefinitely for WS confirmation.
         for id in &all_order_ids {
             if let Some(mut order) = state.my_orders.get_mut(id) {
-                order.status = OrderStatus::Canceled;
-                order.updated_at = Utc::now();
+                if order.status != OrderStatus::Canceled {
+                    warn!("Order {id} cancel not confirmed via WS within L3 timeout, force-marking");
+                    order.status = OrderStatus::Canceled;
+                    order.updated_at = Utc::now();
+                }
             }
         }
 
@@ -287,6 +313,9 @@ impl OrderExecutor {
             }
         }
 
-        unreachable!("max_retries must be > 0 (validated at config load)")
+        // R7-CQ4: Use bail! instead of unreachable!() since the invariant depends on
+        // config validation in a different module. If validation is ever bypassed,
+        // bail! returns an error instead of panicking the process.
+        anyhow::bail!("max_retries must be > 0 (validated at config load)")
     }
 }

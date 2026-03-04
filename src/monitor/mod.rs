@@ -133,7 +133,8 @@ pub async fn run_orchestrator(
                         order_id: order.id.clone(),
                         market_id,
                         price: order.price,
-                        size: order.original_size - order.size_matched,
+                        // R7-SEC4: Clamp to zero in case SDK returns size_matched > original_size
+                        size: (order.original_size - order.size_matched).max(Decimal::ZERO),
                         side,
                         status: crate::data::state::OrderStatus::Live,
                         created_at: order.created_at,
@@ -158,25 +159,28 @@ pub async fn run_orchestrator(
         info!("Market {market_id}: settles at {end_date}, {hours:.1}h remaining");
     }
 
-    // Spawn market data WebSocket
+    // R7-CQ3: Save WS JoinHandles to detect fatal task exits and trigger L3.
+    // WS tasks have internal reconnection loops, so they should never exit.
+    // If they do, something is fundamentally wrong and we must stop trading.
     let token_ids: Vec<String> = config.markets.iter().map(|m| m.token_id.clone()).collect();
     let ws_state = state.clone();
-    tokio::spawn(async move {
+    let market_ws_handle = tokio::spawn(async move {
         if let Err(e) = ws::run_market_ws(ws_state, token_ids).await {
             error!("Market WebSocket fatal error: {e:#}");
         }
     });
 
-    // Spawn user events WebSocket (for ghost fill detection)
     let ws_state = state.clone();
     let ws_credentials = executor.credentials().clone();
     let ws_address = executor.address();
     let ws_rc = Arc::clone(&risk_controller);
-    tokio::spawn(async move {
+    let user_ws_handle = tokio::spawn(async move {
         if let Err(e) = ws::run_user_ws(ws_state, ws_credentials, ws_address, ws_rc).await {
             error!("User WebSocket fatal error: {e:#}");
         }
     });
+    tokio::pin!(market_ws_handle);
+    tokio::pin!(user_ws_handle);
 
     // Main strategy loop interval
     let mut strategy_tick = interval(Duration::from_secs(10));
@@ -305,6 +309,25 @@ pub async fn run_orchestrator(
                 prune_stale_state(&state, &risk_controller).await;
             }
 
+            // R7-CQ3: WS task fatal exit detection — trigger L3 and stop bot.
+            // WS tasks have internal reconnect loops, so exit means unrecoverable failure.
+            result = &mut market_ws_handle => {
+                error!("Market WS task exited unexpectedly: {result:?}");
+                let mut rc = risk_controller.lock().await;
+                rc.force_l3(crate::risk::RiskTrigger::WsDisconnect { duration_secs: 0 });
+                drop(rc);
+                executor.cancel_all_orders(&state, &risk_controller).await.ok();
+                return Err(anyhow::anyhow!("Market WebSocket task crashed — entering L3 and stopping"));
+            }
+            result = &mut user_ws_handle => {
+                error!("User WS task exited unexpectedly: {result:?}");
+                let mut rc = risk_controller.lock().await;
+                rc.force_l3(crate::risk::RiskTrigger::WsDisconnect { duration_secs: 0 });
+                drop(rc);
+                executor.cancel_all_orders(&state, &risk_controller).await.ok();
+                return Err(anyhow::anyhow!("User WebSocket task crashed — entering L3 and stopping"));
+            }
+
             // Graceful shutdown
             _ = signal::ctrl_c() => {
                 warn!("Ctrl+C received, initiating graceful shutdown...");
@@ -367,8 +390,8 @@ async fn prune_stale_state(
     state: &SharedState,
     risk_controller: &Arc<Mutex<RiskController>>,
 ) {
-    let terminal_cutoff = Utc::now() - chrono::Duration::minutes(5);
-    let stale_live_cutoff = Utc::now() - chrono::Duration::hours(1);
+    let terminal_cutoff = Utc::now() - chrono::TimeDelta::minutes(5);
+    let stale_live_cutoff = Utc::now() - chrono::TimeDelta::hours(1);
 
     // Remove orders that have been Canceled or Matched for over 5 minutes,
     // or Live/Pending orders not updated in over 1 hour

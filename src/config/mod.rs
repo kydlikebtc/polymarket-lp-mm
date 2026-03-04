@@ -16,7 +16,6 @@ pub struct AppConfig {
     pub api: ApiConfig,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct MarketConfig {
     pub market_id: String,
@@ -37,7 +36,6 @@ pub struct CapitalConfig {
     pub max_per_market_fraction: Decimal,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct PricingConfig {
     /// Ladder layers configuration
@@ -77,7 +75,6 @@ pub struct PositionConfig {
     pub merge_cooldown_secs: u64,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct RiskConfig {
     // L2 thresholds
@@ -113,7 +110,6 @@ pub struct ExecutionConfig {
     pub cancel_confirm_timeout_ms: u64,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiConfig {
     pub clob_base_url: String,
@@ -275,7 +271,12 @@ impl AppConfig {
         Ok(())
     }
 
-    /// Per-market capital allocation
+    /// Per-market capital allocation.
+    ///
+    /// R7-BL1: With a single market and max_per_market_fraction < 1.0,
+    /// the unused capital fraction sits idle. This is intentional — the cap is
+    /// a risk control even with one market (limiting single-market exposure).
+    /// Set max_per_market_fraction = 1.0 in config to use full capital for a single market.
     pub fn per_market_capital(&self) -> Decimal {
         let market_count = Decimal::from(self.markets.len() as u64);
         let max_per_market = self.capital.total_capital * self.capital.max_per_market_fraction;
