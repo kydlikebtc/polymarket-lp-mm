@@ -250,10 +250,18 @@ impl AppConfig {
             "cancel_confirm_timeout_ms must be > 0"
         );
 
-        // API URL scheme validation
+        // API URL scheme validation (R6-5: also validate gamma and polygon URLs)
         anyhow::ensure!(
             self.api.clob_base_url.starts_with("https://"),
             "clob_base_url must use HTTPS"
+        );
+        anyhow::ensure!(
+            self.api.gamma_base_url.starts_with("https://"),
+            "gamma_base_url must use HTTPS"
+        );
+        anyhow::ensure!(
+            self.api.polygon_rpc_url.starts_with("https://"),
+            "polygon_rpc_url must use HTTPS"
         );
         anyhow::ensure!(
             self.api.ws_market_url.starts_with("wss://"),

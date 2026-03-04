@@ -161,24 +161,15 @@ impl OrderExecutor {
             }
         }
 
-        // Call real API cancel-all (NO lock held during HTTP)
-        match self.client.cancel_all_orders().await {
-            Ok(()) => {
-                info!("API cancel-all succeeded for {} orders", all_order_ids.len());
-                // Only mark locally after API confirms success
-                for id in &all_order_ids {
-                    if let Some(mut order) = state.my_orders.get_mut(id) {
-                        order.status = OrderStatus::Canceled;
-                        order.updated_at = Utc::now();
-                    }
-                }
-            }
-            Err(e) => {
-                // Do NOT mark as cancelled locally — orders may still be live on exchange.
-                // L3 loop will re-attempt cancel on next tick.
-                error!(
-                    "API cancel-all FAILED: {e:#}. Orders NOT marked locally — will retry on next tick."
-                );
+        // R6-4: Call real API cancel-all and propagate errors (NO lock held during HTTP).
+        // On API failure, orders remain marked Live locally; L3 loop will re-attempt.
+        self.client.cancel_all_orders().await?;
+
+        info!("API cancel-all succeeded for {} orders", all_order_ids.len());
+        for id in &all_order_ids {
+            if let Some(mut order) = state.my_orders.get_mut(id) {
+                order.status = OrderStatus::Canceled;
+                order.updated_at = Utc::now();
             }
         }
 
@@ -222,6 +213,15 @@ impl OrderExecutor {
         state: &SharedState,
         batch: &[QuoteOrder],
     ) -> Result<Vec<String>> {
+        // R6-2: Refuse to submit if my_orders tracking map is at capacity.
+        // Prevents unbounded memory growth from order accumulation.
+        const MAX_TRACKED_ORDERS: usize = 5000;
+        if state.my_orders.len() >= MAX_TRACKED_ORDERS {
+            anyhow::bail!(
+                "my_orders at capacity ({MAX_TRACKED_ORDERS}), refusing new orders until stale entries are pruned"
+            );
+        }
+
         // Returns Vec<Option<String>> preserving index alignment with batch
         let results = self.client.post_orders_batch(batch).await?;
 

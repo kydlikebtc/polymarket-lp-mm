@@ -255,26 +255,16 @@ impl ClobClient {
     }
 }
 
-/// Create and authenticate a CLOB client from environment variables
-pub async fn create_clob_client(config: &AppConfig) -> Result<ClobClient> {
-    let api_key_str = std::env::var("POLYMARKET_API_KEY")
-        .context("POLYMARKET_API_KEY not set")?;
-    let api_secret = std::env::var("POLYMARKET_API_SECRET")
-        .context("POLYMARKET_API_SECRET not set")?;
-    let api_passphrase = std::env::var("POLYMARKET_API_PASSPHRASE")
-        .context("POLYMARKET_API_PASSPHRASE not set")?;
-    let private_key = std::env::var("POLYMARKET_PRIVATE_KEY")
-        .context("POLYMARKET_PRIVATE_KEY not set")?;
-
-    // R5-8: Clear secrets from environment immediately after reading
-    // to reduce exposure window (visible in /proc/[pid]/environ, inherited by children)
-    // SAFETY: No other threads are running yet (called during single-threaded init).
-    unsafe {
-        std::env::remove_var("POLYMARKET_PRIVATE_KEY");
-        std::env::remove_var("POLYMARKET_API_SECRET");
-        std::env::remove_var("POLYMARKET_API_PASSPHRASE");
-    }
-
+/// Create and authenticate a CLOB client.
+/// R6-1: Secrets are passed as parameters (read and cleared in single-threaded main
+/// before tokio runtime starts) instead of reading from env inside async context.
+pub async fn create_clob_client(
+    config: &AppConfig,
+    api_key_str: String,
+    api_secret: String,
+    api_passphrase: String,
+    private_key: String,
+) -> Result<ClobClient> {
     info!("Initializing CLOB client at {}", config.api.clob_base_url);
 
     // Create signer from private key, set chain to Polygon mainnet

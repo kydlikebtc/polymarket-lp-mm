@@ -1,5 +1,6 @@
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use alloy::primitives::{Address, U256};
 use anyhow::Result;
@@ -50,6 +51,11 @@ pub async fn run_market_ws(
                 false
             }
         };
+
+        // R6-3: Reset connected flag on disconnect so strategy loop pauses until reconnected.
+        // Uses Release ordering so the strategy thread (Acquire) sees it immediately.
+        state.market_ws_connected.store(false, Ordering::Release);
+
         // Reset backoff on successful connection; exponential increase only on failure
         if was_connected {
             backoff_secs = 1;
@@ -86,7 +92,8 @@ async fn run_market_ws_inner(
             Ok(book) => {
                 received_any = true;
                 // R5-12: Mark market WS as having received data
-                state.market_ws_connected.store(true, std::sync::atomic::Ordering::Relaxed);
+                // R6-8: Use Release ordering for ARM correctness
+                state.market_ws_connected.store(true, Ordering::Release);
 
                 // Update heartbeat timestamp
                 {
@@ -106,7 +113,9 @@ async fn run_market_ws_inner(
                 let best_bid = book.bids.first().map(|b| b.price);
                 let best_ask = book.asks.first().map(|a| a.price);
 
-                if let Some(mut ms) = state.market_states.get_mut(&market_id) {
+                // R6-6: Read midpoint and drop DashMap RefMut before calling record_price,
+                // to avoid holding market_states entry across another DashMap access.
+                let midpoint_for_record = if let Some(mut ms) = state.market_states.get_mut(&market_id) {
                     // Update whichever side(s) are available
                     if let Some(bid) = best_bid { ms.best_bid = Some(bid); }
                     if let Some(ask) = best_ask { ms.best_ask = Some(ask); }
@@ -117,23 +126,34 @@ async fn run_market_ws_inner(
                             ms.spread = ask - bid;
                         }
                         (Some(bid), None) => {
-                            ms.midpoint = bid; // Best approximation with single side
+                            ms.midpoint = bid;
                             ms.spread = Decimal::ZERO;
                         }
                         (None, Some(ask)) => {
                             ms.midpoint = ask;
                             ms.spread = Decimal::ZERO;
                         }
-                        (None, None) => {} // Empty book, keep previous values
+                        (None, None) => {}
                     }
                     ms.updated_at = Utc::now();
-                    state.record_price(&market_id, ms.midpoint);
+                    let mid = ms.midpoint;
+                    let spread = ms.spread;
 
                     debug!(
                         "Book update: market={}, token={}, mid={}, spread={}, bids={}, asks={}",
-                        market_id, token_id, ms.midpoint, ms.spread,
+                        market_id, token_id, mid, spread,
                         book.bids.len(), book.asks.len()
                     );
+
+                    Some(mid)
+                    // ms (RefMut) dropped here
+                } else {
+                    None
+                };
+
+                // Record price history AFTER releasing market_states entry
+                if let Some(mid) = midpoint_for_record {
+                    state.record_price(&market_id, mid);
                 }
             }
             Err(e) => {
@@ -171,6 +191,10 @@ pub async fn run_user_ws(
                 false
             }
         };
+
+        // R6-3: Reset connected flag on disconnect
+        state.user_ws_connected.store(false, Ordering::Release);
+
         if was_connected {
             backoff_secs = 1;
         }
@@ -202,8 +226,8 @@ async fn run_user_ws_inner(
 
     while let Some(event) = stream.next().await {
         received_any = true;
-        // R5-12: Mark user WS as having received data
-        state.user_ws_connected.store(true, std::sync::atomic::Ordering::Relaxed);
+        // R5-12 + R6-8: Mark user WS as having received data (Release for ARM)
+        state.user_ws_connected.store(true, Ordering::Release);
 
         // Update user WS heartbeat for disconnect detection
         {
@@ -219,7 +243,6 @@ async fn run_user_ws_inner(
                 // Update order state
                 if let Some(mut our_order) = state.my_orders.get_mut(&order_id) {
                     // R5-19: Cross-validate that WS event matches our local record.
-                    // Reject events where asset_id resolves to a different market_id.
                     let ws_market = state.resolve_market_id(&order.asset_id.to_string());
                     if let Some(ref ws_mid) = ws_market {
                         if *ws_mid != our_order.market_id {
@@ -302,7 +325,6 @@ async fn run_user_ws_inner(
                 }
 
                 // Read midpoint BEFORE acquiring positions write lock
-                // to avoid cross-lock deadlock with monitor (which does market_states → positions)
                 let current_midpoint = state.market_states.get(&resolved)
                     .map(|ms| ms.midpoint);
 
@@ -315,7 +337,6 @@ async fn run_user_ws_inner(
                             pos.yes_shares = (pos.yes_shares - trade.size).max(Decimal::ZERO);
                         }
                     }
-                    // Recalculate values with pre-read midpoint (no nested DashMap access)
                     if let Some(mid) = current_midpoint {
                         pos.yes_value = pos.yes_shares * mid;
                         pos.no_value = pos.no_shares * (Decimal::ONE - mid);

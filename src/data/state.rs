@@ -69,6 +69,11 @@ impl PnlTracker {
     /// BUY: increases position in market, updates that market's average cost.
     /// SELL: realizes PnL = (sell_price - market_avg_cost) * size.
     pub fn record_fill(&mut self, market_id: &str, side: OrderSide, price: Decimal, size: Decimal) {
+        // R6-7: Guard against zero-size fills (prevent division by zero in avg_cost calc)
+        if size.is_zero() {
+            return;
+        }
+
         let today = Utc::now().date_naive();
         if today != self.date {
             // Day rolled over — reset PnL but keep cost basis for overnight positions
@@ -322,9 +327,10 @@ impl SharedState {
         market_secs.max(user_secs)
     }
 
-    /// R5-12: Check if both WebSocket connections have received at least one message
+    /// R5-12: Check if both WebSocket connections have received at least one message.
+    /// R6-8: Use Acquire ordering so that reads on ARM see the store from WS threads.
     pub fn both_ws_connected(&self) -> bool {
-        self.market_ws_connected.load(Ordering::Relaxed)
-            && self.user_ws_connected.load(Ordering::Relaxed)
+        self.market_ws_connected.load(Ordering::Acquire)
+            && self.user_ws_connected.load(Ordering::Acquire)
     }
 }

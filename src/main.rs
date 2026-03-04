@@ -1,14 +1,36 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
 use polymarket_mm::{config, data, execution, monitor, position, pricing, risk};
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Initialize logging
+/// R6-1: Read and clear secrets while single-threaded, before tokio runtime starts.
+/// This avoids the unsound `unsafe { remove_var() }` inside a multi-threaded runtime.
+fn read_and_clear_secrets() -> Result<(String, String, String, String)> {
+    let api_key = std::env::var("POLYMARKET_API_KEY")
+        .context("POLYMARKET_API_KEY not set")?;
+    let api_secret = std::env::var("POLYMARKET_API_SECRET")
+        .context("POLYMARKET_API_SECRET not set")?;
+    let api_passphrase = std::env::var("POLYMARKET_API_PASSPHRASE")
+        .context("POLYMARKET_API_PASSPHRASE not set")?;
+    let private_key = std::env::var("POLYMARKET_PRIVATE_KEY")
+        .context("POLYMARKET_PRIVATE_KEY not set")?;
+
+    // SAFETY: Only main thread is running (tokio runtime not yet started).
+    // remove_var is unsafe in Rust 2024 because concurrent env access is UB.
+    unsafe {
+        std::env::remove_var("POLYMARKET_PRIVATE_KEY");
+        std::env::remove_var("POLYMARKET_API_SECRET");
+        std::env::remove_var("POLYMARKET_API_PASSPHRASE");
+    }
+
+    Ok((api_key, api_secret, api_passphrase, private_key))
+}
+
+fn main() -> Result<()> {
+    // Initialize logging (sync, before runtime)
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -20,9 +42,24 @@ async fn main() -> Result<()> {
 
     info!("Polymarket MM Bot v{} starting...", env!("CARGO_PKG_VERSION"));
 
-    // Load environment variables
+    // Load environment variables (sync, single-threaded)
     dotenvy::dotenv().ok();
 
+    // R6-1: Read and clear secrets while single-threaded (before tokio runtime).
+    let (api_key, api_secret, api_passphrase, private_key) = read_and_clear_secrets()?;
+    info!("Secrets loaded and cleared from environment");
+
+    // Start tokio runtime — worker threads spawn here
+    tokio::runtime::Runtime::new()?
+        .block_on(async_main(api_key, api_secret, api_passphrase, private_key))
+}
+
+async fn async_main(
+    api_key: String,
+    api_secret: String,
+    api_passphrase: String,
+    private_key: String,
+) -> Result<()> {
     // Step 1: Load configuration
     let app_config = config::AppConfig::load()?;
     info!(
@@ -35,8 +72,14 @@ async fn main() -> Result<()> {
     let state = data::SharedState::new(&app_config);
     info!("Shared state initialized");
 
-    // Step 3: Validate API connection
-    let clob_client = data::rest::create_clob_client(&app_config).await?;
+    // Step 3: Validate API connection (secrets consumed here, then dropped)
+    let clob_client = data::rest::create_clob_client(
+        &app_config,
+        api_key,
+        api_secret,
+        api_passphrase,
+        private_key,
+    ).await?;
     info!("CLOB API connection validated");
 
     // Step 4: Initialize risk controller (shared via Arc<Mutex> for WS access)
