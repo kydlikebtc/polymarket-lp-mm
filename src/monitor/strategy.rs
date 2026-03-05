@@ -122,17 +122,15 @@ pub async fn run_market_strategy(
     // R8-BL14: Refresh position values with current midpoint before reading IIR.
     // Without this, yes_value/no_value can be up to 60s stale (position_tick interval),
     // causing IIR to lag behind market moves between position ticks.
-    if let Some(mut pos) = state.positions.get_mut(market_id) {
+    // R9-CR7: Compute IIR inside the same get_mut block to avoid TOCTOU race
+    // where a WS fill could modify positions between our write and read.
+    let iir = if let Some(mut pos) = state.positions.get_mut(market_id) {
         pos.yes_value = pos.yes_shares * current_midpoint;
         pos.no_value = pos.no_shares * (Decimal::ONE - current_midpoint);
-    }
-
-    // Get current IIR (now using fresh values)
-    let iir = state
-        .positions
-        .get(market_id)
-        .map(|p| p.iir())
-        .unwrap_or(Decimal::ZERO);
+        pos.iir()
+    } else {
+        Decimal::ZERO
+    };
 
     // Compute factors
     let vaf = pricing_engine.compute_vaf(state, market_id);

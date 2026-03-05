@@ -121,14 +121,14 @@ impl OrderExecutor {
         // Do NOT force-mark as Canceled — the exchange may not have processed the cancel yet.
         // Caller (run_market_strategy) will detect still-live orders and skip submission.
         for id in &order_ids {
-            if let Some(order) = state.my_orders.get(id) {
-                if order.status != OrderStatus::Canceled {
-                    warn!(
-                        "Order {id} cancel not confirmed within timeout (status={:?}). \
-                         May still be live on exchange — skipping new order submission this round.",
-                        order.status
-                    );
-                }
+            if let Some(order) = state.my_orders.get(id)
+                && order.status != OrderStatus::Canceled
+            {
+                warn!(
+                    "Order {id} cancel not confirmed within timeout (status={:?}). \
+                     May still be live on exchange — skipping new order submission this round.",
+                    order.status
+                );
             }
         }
 
@@ -190,12 +190,12 @@ impl OrderExecutor {
         // Force-mark any unconfirmed orders as Canceled locally.
         // In L3 emergency, we cannot wait indefinitely for WS confirmation.
         for id in &all_order_ids {
-            if let Some(mut order) = state.my_orders.get_mut(id) {
-                if order.status != OrderStatus::Canceled {
-                    warn!("Order {id} cancel not confirmed via WS within L3 timeout, force-marking");
-                    order.status = OrderStatus::Canceled;
-                    order.updated_at = Utc::now();
-                }
+            if let Some(mut order) = state.my_orders.get_mut(id)
+                && order.status != OrderStatus::Canceled
+            {
+                warn!("Order {id} cancel not confirmed via WS within L3 timeout, force-marking");
+                order.status = OrderStatus::Canceled;
+                order.updated_at = Utc::now();
             }
         }
 

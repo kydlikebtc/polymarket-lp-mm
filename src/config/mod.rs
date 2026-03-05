@@ -133,8 +133,14 @@ impl AppConfig {
         let content = std::fs::read_to_string(&config_path)
             .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
 
+        Self::from_toml_str(&content)
+    }
+
+    /// Parse and validate config from a TOML string.
+    /// Useful for testing without filesystem or environment variable dependencies.
+    pub fn from_toml_str(content: &str) -> Result<Self> {
         let config: AppConfig =
-            toml::from_str(&content).context("Failed to parse config.toml")?;
+            toml::from_str(content).context("Failed to parse config TOML")?;
 
         config.validate()?;
 
@@ -179,6 +185,45 @@ impl AppConfig {
         anyhow::ensure!(
             total_fraction <= Decimal::ONE,
             "Sum of layer capital_fractions ({total_fraction}) must be <= 1.0"
+        );
+
+        // Market-level validations
+        for (i, market) in self.markets.iter().enumerate() {
+            anyhow::ensure!(
+                market.min_size > Decimal::ZERO,
+                "Market {i} ({}) min_size must be > 0",
+                market.name
+            );
+            anyhow::ensure!(
+                market.max_incentive_spread > Decimal::ZERO,
+                "Market {i} ({}) max_incentive_spread must be > 0",
+                market.name
+            );
+            anyhow::ensure!(
+                !market.market_id.is_empty(),
+                "Market {i} market_id must not be empty"
+            );
+            anyhow::ensure!(
+                !market.token_id.is_empty(),
+                "Market {i} token_id must not be empty"
+            );
+        }
+
+        // Position parameter validations
+        anyhow::ensure!(
+            self.position.min_merge_size > Decimal::ZERO,
+            "position.min_merge_size ({}) must be > 0",
+            self.position.min_merge_size
+        );
+        anyhow::ensure!(
+            self.position.iir_extreme_threshold > self.position.iir_medium_threshold,
+            "position.iir_extreme_threshold ({}) must be > iir_medium_threshold ({})",
+            self.position.iir_extreme_threshold, self.position.iir_medium_threshold
+        );
+        anyhow::ensure!(
+            self.position.iir_medium_threshold > Decimal::ZERO,
+            "position.iir_medium_threshold ({}) must be > 0",
+            self.position.iir_medium_threshold
         );
 
         // Risk parameter sanity checks
@@ -266,10 +311,31 @@ impl AppConfig {
             p.skew_factor
         );
 
+        // Risk L2 multiplier bounds
+        anyhow::ensure!(
+            r.l2_size_multiplier > Decimal::ZERO && r.l2_size_multiplier <= Decimal::ONE,
+            "l2_size_multiplier ({}) must be in (0, 1.0]",
+            r.l2_size_multiplier
+        );
+        anyhow::ensure!(
+            r.l2_spread_multiplier >= Decimal::ONE,
+            "l2_spread_multiplier ({}) must be >= 1.0",
+            r.l2_spread_multiplier
+        );
+
         // Execution bounds
         anyhow::ensure!(
             self.execution.cancel_confirm_timeout_ms > 0,
             "cancel_confirm_timeout_ms must be > 0"
+        );
+        anyhow::ensure!(
+            self.execution.base_retry_delay_ms > 0,
+            "base_retry_delay_ms must be > 0"
+        );
+        anyhow::ensure!(
+            self.execution.max_retry_delay_ms >= self.execution.base_retry_delay_ms,
+            "max_retry_delay_ms ({}) must be >= base_retry_delay_ms ({})",
+            self.execution.max_retry_delay_ms, self.execution.base_retry_delay_ms
         );
 
         // API URL scheme validation (R6-5: also validate gamma and polygon URLs)

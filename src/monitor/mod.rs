@@ -12,6 +12,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::AppConfig;
 use crate::data::SharedState;
+use crate::data::ctf::CtfMerger;
 use crate::data::gamma::{self, GammaClient};
 use crate::data::ws;
 use crate::execution::OrderExecutor;
@@ -20,6 +21,13 @@ use crate::pricing::PricingEngine;
 use crate::risk::{RiskController, RiskLevel};
 
 use self::strategy::{evaluate_risk, run_market_strategy};
+
+/// TUI snapshot + command channel pair (only available with `tui` feature).
+#[cfg(feature = "tui")]
+pub type TuiChannels = (
+    tokio::sync::mpsc::Sender<crate::tui::snapshot::DashboardSnapshot>,
+    tokio::sync::mpsc::Receiver<crate::tui::app::TuiCommand>,
+);
 
 /// Main orchestration loop: ties all modules together.
 ///
@@ -34,6 +42,8 @@ pub async fn run_orchestrator(
     mut executor: OrderExecutor,
     pricing_engine: PricingEngine,
     mut position_manager: PositionManager,
+    ctf_merger: Option<CtfMerger>,
+    #[cfg(feature = "tui")] tui_channels: Option<TuiChannels>,
 ) -> Result<()> {
     {
         let mut rc = risk_controller.lock().await;
@@ -52,11 +62,13 @@ pub async fn run_orchestrator(
             Ok(balance) => {
                 if balance > Decimal::ZERO {
                     has_existing_positions = true;
+                    // R9-CR4: Read midpoint before positions lock (R6-6 compliance)
+                    let init_mid = state.market_states.get(&market.market_id).map(|ms| ms.midpoint);
                     if let Some(mut pos) = state.positions.get_mut(&market.market_id) {
                         pos.yes_shares = balance;
                         // Compute initial yes_value so IIR is non-zero before first position_tick
-                        if let Some(ms) = state.market_states.get(&market.market_id) {
-                            pos.yes_value = balance * ms.midpoint;
+                        if let Some(mid) = init_mid {
+                            pos.yes_value = balance * mid;
                         }
                         pos.updated_at = Utc::now();
                         info!(
@@ -149,14 +161,17 @@ pub async fn run_orchestrator(
         }
     }
 
-    // Fetch settlement times from Gamma API
+    // Fetch settlement times and condition IDs from Gamma API
     let gamma_client = GammaClient::new(&config.api.gamma_base_url)?;
     let market_ids: Vec<String> = config.markets.iter().map(|m| m.market_id.clone()).collect();
-    let settlement_map = gamma_client.fetch_all_end_dates(&market_ids).await;
+    let (settlement_map, condition_map) = gamma_client.fetch_all_metadata(&market_ids).await;
     for (market_id, end_date) in &settlement_map {
         state.settlement_times.insert(market_id.clone(), *end_date);
         let hours = gamma::hours_until(end_date).unwrap_or(0.0);
         info!("Market {market_id}: settles at {end_date}, {hours:.1}h remaining");
+    }
+    for (market_id, condition_id) in &condition_map {
+        state.condition_ids.insert(market_id.clone(), *condition_id);
     }
 
     // R7-CQ3: Save WS JoinHandles to detect fatal task exits and trigger L3.
@@ -198,6 +213,19 @@ pub async fn run_orchestrator(
         std::collections::HashMap::new();
     let mut last_quote_times: std::collections::HashMap<String, chrono::DateTime<Utc>> =
         std::collections::HashMap::new();
+
+    // TUI integration: extract channels or set up no-op placeholders.
+    // We use a simple bool flag + Option so the select! branches compile
+    // regardless of whether the `tui` feature is enabled.
+    #[cfg(feature = "tui")]
+    let (tui_snapshot_tx, mut tui_cmd_rx, tui_enabled) = match tui_channels {
+        Some((tx, rx)) => (Some(tx), Some(rx), true),
+        None => (None, None, false),
+    };
+    #[cfg(not(feature = "tui"))]
+    let (tui_enabled,): (bool,) = (false,);
+
+    let mut tui_tick = interval(Duration::from_millis(250));
 
     info!("Main loop started. Press Ctrl+C to stop gracefully.");
 
@@ -257,12 +285,13 @@ pub async fn run_orchestrator(
             // Position management tick (every 60 seconds)
             _ = position_tick.tick() => {
                 for market in &config.markets {
-                    // Update position values with current midpoint
-                    if let Some(ms) = state.market_states.get(&market.market_id) {
+                    // R9-CR4: Read midpoint before positions lock (R6-6 compliance)
+                    let midpoint = state.market_states.get(&market.market_id).map(|ms| ms.midpoint);
+                    if let Some(mid) = midpoint {
                         position_manager.update_position_values(
                             &state,
                             &market.market_id,
-                            ms.midpoint,
+                            mid,
                         );
                     }
 
@@ -276,6 +305,7 @@ pub async fn run_orchestrator(
                                 &risk_controller,
                                 &state,
                                 &mut position_manager,
+                                ctf_merger.as_ref(),
                             ).await;
                         }
                     }
@@ -293,14 +323,22 @@ pub async fn run_orchestrator(
                 log_metrics(&state, &config, risk_level).await;
             }
 
-            // Refresh settlement times from Gamma API (every 30 minutes)
+            // Refresh settlement times and condition_ids from Gamma API (every 30 minutes)
+            // R8-CR3: Use fetch_all_metadata instead of fetch_all_end_dates
+            // to also refresh condition_ids (needed for CTF merge operations).
             _ = settlement_tick.tick() => {
-                let updated = gamma_client.fetch_all_end_dates(&market_ids).await;
-                for (market_id, end_date) in &updated {
+                let (settlement_map, condition_map) = gamma_client.fetch_all_metadata(&market_ids).await;
+                for (market_id, end_date) in &settlement_map {
                     state.settlement_times.insert(market_id.clone(), *end_date);
                 }
-                if !updated.is_empty() {
-                    info!("Refreshed settlement times for {} markets", updated.len());
+                for (market_id, condition_id) in &condition_map {
+                    state.condition_ids.insert(market_id.clone(), *condition_id);
+                }
+                if !settlement_map.is_empty() || !condition_map.is_empty() {
+                    info!(
+                        "Refreshed metadata: {} settlement times, {} condition_ids",
+                        settlement_map.len(), condition_map.len()
+                    );
                 }
             }
 
@@ -328,6 +366,53 @@ pub async fn run_orchestrator(
                 return Err(anyhow::anyhow!("User WebSocket task crashed — entering L3 and stopping"));
             }
 
+            // TUI: send snapshot to dashboard (every 250ms, only when TUI is active)
+            _ = tui_tick.tick(), if tui_enabled => {
+                #[cfg(feature = "tui")]
+                if let Some(ref tx) = tui_snapshot_tx {
+                    let snap = crate::tui::snapshot::collect_snapshot(
+                        &config, &state, &risk_controller,
+                    ).await;
+                    let _ = tx.try_send(snap);
+                }
+            }
+
+            // TUI: receive commands from dashboard
+            cmd = async {
+                #[cfg(feature = "tui")]
+                {
+                    match tui_cmd_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }
+                #[cfg(not(feature = "tui"))]
+                {
+                    std::future::pending::<Option<()>>().await
+                }
+            }, if tui_enabled => {
+                #[cfg(feature = "tui")]
+                if let Some(cmd) = cmd {
+                    match cmd {
+                        crate::tui::app::TuiCommand::Quit => {
+                            warn!("TUI quit requested, initiating graceful shutdown...");
+                            if let Err(e) = executor.cancel_all_orders(&state, &risk_controller).await {
+                                error!("Failed to cancel orders during TUI shutdown: {e:#}");
+                            }
+                            info!("All orders cancelled. Shutdown complete.");
+                            return Ok(());
+                        }
+                        crate::tui::app::TuiCommand::RecoverL3 => {
+                            warn!("TUI requested manual L3 recovery");
+                            let mut rc = risk_controller.lock().await;
+                            rc.manual_recover();
+                        }
+                    }
+                }
+                #[cfg(not(feature = "tui"))]
+                let _ = cmd;
+            }
+
             // Graceful shutdown
             _ = signal::ctrl_c() => {
                 warn!("Ctrl+C received, initiating graceful shutdown...");
@@ -348,12 +433,61 @@ async fn handle_position_action(
     risk_controller: &Arc<Mutex<RiskController>>,
     state: &SharedState,
     position_manager: &mut PositionManager,
+    ctf_merger: Option<&CtfMerger>,
 ) {
     match action {
         PositionAction::TriggerMerge { market_id, amount } => {
-            info!("Would merge {amount} pairs in market={market_id}");
-            // TODO: Call CTF contract mergePositions via alloy
-            // R5-18: Record merge timestamp for cooldown enforcement
+            // Look up condition_id for this market (fetched from Gamma API at startup)
+            let Some(condition_id) = state.condition_ids.get(market_id).map(|v| *v) else {
+                warn!(
+                    "Cannot merge market={market_id}: no condition_id available. \
+                     Gamma API may not have returned it."
+                );
+                return;
+            };
+
+            let Some(merger) = ctf_merger else {
+                warn!(
+                    "Merge triggered for market={market_id} amount={amount}, \
+                     but CTF merger not initialized (missing polygon_rpc_url?). Skipping."
+                );
+                // R5-18: Still record merge timestamp to enforce cooldown
+                position_manager.record_merge(market_id);
+                return;
+            };
+
+            info!("Executing CTF merge: market={market_id}, amount={amount}, condition_id={condition_id}");
+            match merger.merge_positions(condition_id, *amount).await {
+                Ok(tx_hash) => {
+                    info!(
+                        "Merge succeeded: market={market_id}, amount={amount}, tx={tx_hash}"
+                    );
+                    // R8-CR2: Update local position state after successful merge.
+                    // Merge burns equal YES+NO shares and returns USDC,
+                    // so both sides decrease by the merged amount.
+                    // R9-CR4: Read midpoint before acquiring positions lock (R6-6 compliance).
+                    let current_mid = state.market_states.get(market_id).map(|ms| ms.midpoint);
+                    if let Some(mut pos) = state.positions.get_mut(market_id) {
+                        pos.yes_shares = (pos.yes_shares - *amount).max(Decimal::ZERO);
+                        pos.no_shares = (pos.no_shares - *amount).max(Decimal::ZERO);
+                        if let Some(mid) = current_mid {
+                            pos.yes_value = pos.yes_shares * mid;
+                            pos.no_value = pos.no_shares * (Decimal::ONE - mid);
+                        }
+                        pos.updated_at = Utc::now();
+                        debug!(
+                            "Position updated after merge: market={market_id}, \
+                             YES={}, NO={}", pos.yes_shares, pos.no_shares
+                        );
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "Merge failed: market={market_id}, amount={amount}, error={e:#}"
+                    );
+                }
+            }
+            // R5-18: Record merge timestamp for cooldown enforcement regardless of success
             position_manager.record_merge(market_id);
         }
         PositionAction::EscalateL2 { market_id, iir } => {
@@ -374,10 +508,10 @@ async fn handle_position_action(
                 });
                 rc.level() == RiskLevel::L3Emergency
             };
-            if should_cancel {
-                if let Err(e) = executor.cancel_all_orders(state, risk_controller).await {
-                    error!("Failed to cancel orders for L3 escalation: {e:#}");
-                }
+            if should_cancel
+                && let Err(e) = executor.cancel_all_orders(state, risk_controller).await
+            {
+                error!("Failed to cancel orders for L3 escalation: {e:#}");
             }
         }
     }

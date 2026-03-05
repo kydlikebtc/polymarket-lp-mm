@@ -275,3 +275,189 @@ fn test_prices_within_bounds() {
         }
     }
 }
+
+// ── Boundary Tests ──
+
+#[test]
+fn test_ask_capped_by_available_shares() {
+    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+    let market = test_market_config();
+
+    // Very limited available YES shares (only 10 shares)
+    let orders = engine.generate_quotes(
+        &market, dec!(0.50), dec!(0.0), dec!(1.0), dec!(1.0),
+        dec!(500.0), RiskLevel::L1Normal, dec!(10.0),
+    );
+
+    let total_ask_size: Decimal = orders.iter()
+        .filter(|o| matches!(o.side, OrderSide::Sell))
+        .map(|o| o.size)
+        .sum();
+
+    assert!(
+        total_ask_size <= dec!(10.0),
+        "Total ask size ({total_ask_size}) should not exceed available shares (10)"
+    );
+}
+
+#[test]
+fn test_qscore_zero_spread() {
+    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+
+    // max_spread = 0 → Q-Score should be 0
+    let orders = vec![polymarket_mm::pricing::QuoteOrder {
+        market_id: "m1".to_string(),
+        token_id: "t1".to_string(),
+        side: OrderSide::Buy,
+        price: dec!(0.50),
+        size: dec!(100),
+        layer: 0,
+    }];
+
+    let q = engine.estimate_qscore(&orders, dec!(0.50), Decimal::ZERO);
+    assert_eq!(q, Decimal::ZERO, "Q-Score should be 0 when max_spread=0");
+}
+
+#[test]
+fn test_qscore_order_outside_spread() {
+    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+
+    // Order distance (0.10) exceeds max_spread (0.03) → contributes 0
+    let orders = vec![polymarket_mm::pricing::QuoteOrder {
+        market_id: "m1".to_string(),
+        token_id: "t1".to_string(),
+        side: OrderSide::Buy,
+        price: dec!(0.40),
+        size: dec!(100),
+        layer: 0,
+    }];
+
+    let q = engine.estimate_qscore(&orders, dec!(0.50), dec!(0.03));
+    assert_eq!(q, Decimal::ZERO, "Order outside max_spread should contribute 0 Q-Score");
+}
+
+#[test]
+fn test_tf_boundary_values() {
+    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+
+    // Exact boundary values
+    assert_eq!(engine.compute_tf(Some(2.0)), dec!(0.0), "Exactly 2h → stop");
+    assert_eq!(engine.compute_tf(Some(6.0)), dec!(3.0), "Exactly 6h → 3x");
+    assert_eq!(engine.compute_tf(Some(12.0)), dec!(2.0), "Exactly 12h → 2x");
+    assert_eq!(engine.compute_tf(Some(24.0)), dec!(1.5), "Exactly 24h → 1.5x");
+    assert_eq!(engine.compute_tf(Some(0.0)), dec!(0.0), "0h → stop");
+
+    // Just above boundaries
+    assert_eq!(engine.compute_tf(Some(2.1)), dec!(3.0), "2.1h → 3x (within 2-6 range)");
+    assert_eq!(engine.compute_tf(Some(6.1)), dec!(2.0), "6.1h → 2x (within 6-12 range)");
+}
+
+#[test]
+fn test_no_orders_below_min_size() {
+    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+    let market = test_market_config(); // min_size = 5.0
+
+    // Very small capital → sizes will be below min_size threshold
+    let orders = engine.generate_quotes(
+        &market, dec!(0.50), dec!(0.0), dec!(1.0), dec!(1.0),
+        dec!(1.0), // Only $1 per market
+        RiskLevel::L1Normal, dec!(10000.0),
+    );
+
+    for order in &orders {
+        assert!(
+            order.size >= dec!(5.0),
+            "Order size {} should be >= min_size 5.0",
+            order.size
+        );
+    }
+}
+
+#[test]
+fn test_extreme_midpoint_prices_within_bounds() {
+    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+    let market = test_market_config();
+
+    // Extreme low midpoint (0.02): verify all orders stay within [0.01, 0.99]
+    // and bid-ask ordering is preserved despite clamping.
+    let orders = engine.generate_quotes(
+        &market, dec!(0.02), dec!(0.0), dec!(1.0), dec!(1.0),
+        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0),
+    );
+
+    assert!(!orders.is_empty(), "Extreme midpoint should still produce orders");
+
+    for order in &orders {
+        assert!(
+            order.price >= dec!(0.01) && order.price <= dec!(0.99),
+            "Order at extreme midpoint has invalid price: {}",
+            order.price
+        );
+    }
+
+    // Verify bid-ask pairing: all bids must be below all asks
+    let max_bid = orders.iter()
+        .filter(|o| matches!(o.side, OrderSide::Buy))
+        .map(|o| o.price)
+        .max();
+    let min_ask = orders.iter()
+        .filter(|o| matches!(o.side, OrderSide::Sell))
+        .map(|o| o.price)
+        .min();
+
+    if let (Some(max_b), Some(min_a)) = (max_bid, min_ask) {
+        assert!(
+            max_b < min_a,
+            "Crossed quotes detected: max_bid={max_b} >= min_ask={min_a}"
+        );
+    }
+}
+
+#[test]
+fn test_crossed_quotes_with_extreme_skew() {
+    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+    let market = test_market_config();
+
+    // Extreme IIR creates large skew that could push bid above ask
+    let orders = engine.generate_quotes(
+        &market, dec!(0.50), dec!(0.95), dec!(1.0), dec!(1.0),
+        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0),
+    );
+
+    assert!(!orders.is_empty(), "Extreme skew with midpoint=0.50 should still produce orders");
+
+    // Verify no crossed quotes in output
+    let max_bid = orders.iter()
+        .filter(|o| matches!(o.side, OrderSide::Buy))
+        .map(|o| o.price)
+        .max();
+    let min_ask = orders.iter()
+        .filter(|o| matches!(o.side, OrderSide::Sell))
+        .map(|o| o.price)
+        .min();
+
+    if let (Some(max_b), Some(min_a)) = (max_bid, min_ask) {
+        assert!(
+            max_b < min_a,
+            "Extreme skew caused crossed quotes: max_bid={max_b} >= min_ask={min_a}"
+        );
+    }
+}
+
+#[test]
+fn test_tf_zero_produces_empty_due_to_crossed_quotes() {
+    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+    let market = test_market_config();
+
+    // TF=0 zeroes the distance multiplier → min clamp 0.005 → round_dp(2) causes
+    // both bid and ask to round to the same tick (e.g., 0.50) → crossed → skipped.
+    // In practice, strategy.rs intercepts TF=0 before calling the pricing engine.
+    // This test verifies the engine doesn't panic and crossed quote protection works.
+    let orders = engine.generate_quotes(
+        &market, dec!(0.50), dec!(0.0), dec!(1.0), dec!(0.0),
+        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0),
+    );
+
+    // All layers get crossed due to minimal distance + banker's rounding
+    assert!(orders.is_empty(), "TF=0 should produce no orders (crossed after rounding)");
+}

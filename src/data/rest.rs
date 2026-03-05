@@ -36,6 +36,13 @@ pub struct ClobClient {
 }
 
 impl ClobClient {
+    /// Clone the signer for use by other modules (e.g., CTF merge operations).
+    /// The signer is kept in memory for the process lifetime for order signing,
+    /// so sharing it with CTF doesn't increase the attack surface.
+    pub fn clone_signer(&self) -> PrivateKeySigner {
+        self.signer.clone()
+    }
+
     /// Verify API connectivity by fetching USDC balance
     pub async fn check_connection(&self) -> Result<Decimal> {
         let balance = self.fetch_collateral_balance().await?;

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::sync::Mutex;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use polymarket_mm::{config, data, execution, monitor, position, pricing, risk};
 
 /// R6-1: Read and clear secrets while single-threaded, before tokio runtime starts.
@@ -30,7 +30,25 @@ fn read_and_clear_secrets() -> Result<(String, String, String, String)> {
 }
 
 fn main() -> Result<()> {
-    // Initialize logging (sync, before runtime)
+    // TUI mode: redirect tracing to file (TUI owns the terminal)
+    #[cfg(feature = "tui")]
+    {
+        let log_file = std::fs::File::create("bot.log")
+            .context("Failed to create bot.log for TUI mode")?;
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "polymarket_mm=info,warn".into()),
+            )
+            .with_target(true)
+            .with_thread_ids(true)
+            .with_writer(std::sync::Mutex::new(log_file))
+            .with_ansi(false)
+            .init();
+    }
+
+    // Headless mode: log to stderr as usual
+    #[cfg(not(feature = "tui"))]
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -100,7 +118,39 @@ async fn async_main(
     let position_manager = position::PositionManager::new(&app_config.position);
     info!("Position manager initialized");
 
-    // Step 8: Run main orchestration loop
+    // Step 8: Initialize CTF merger for on-chain merge operations (optional)
+    let ctf_merger = match data::ctf::CtfMerger::new(
+        &app_config.api.polygon_rpc_url,
+        executor.client().clone_signer(),
+    ).await {
+        Ok(merger) => {
+            info!("CTF merger initialized for on-chain merge operations");
+            Some(merger)
+        }
+        Err(e) => {
+            warn!("CTF merger initialization failed: {e:#}. Merge operations will be skipped.");
+            None
+        }
+    };
+
+    // Step 9: Set up TUI channels (if feature enabled)
+    #[cfg(feature = "tui")]
+    let tui_channels = {
+        let (snapshot_tx, snapshot_rx) = tokio::sync::mpsc::channel(4);
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(4);
+
+        // Spawn TUI task
+        info!("Starting TUI dashboard...");
+        tokio::spawn(async move {
+            if let Err(e) = polymarket_mm::tui::run_tui(snapshot_rx, cmd_tx).await {
+                error!("TUI task error: {e}");
+            }
+        });
+
+        Some((snapshot_tx, cmd_rx))
+    };
+
+    // Step 10: Run main orchestration loop
     info!("Starting main loop...");
     let result = monitor::run_orchestrator(
         app_config,
@@ -109,6 +159,9 @@ async fn async_main(
         executor,
         pricing_engine,
         position_manager,
+        ctf_merger,
+        #[cfg(feature = "tui")]
+        tui_channels,
     )
     .await;
 

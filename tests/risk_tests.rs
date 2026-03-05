@@ -1,7 +1,8 @@
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 use polymarket_mm::config::RiskConfig;
-use polymarket_mm::risk::{RiskController, RiskLevel};
+use polymarket_mm::risk::{RiskController, RiskLevel, RiskTrigger};
 
 fn test_risk_config() -> RiskConfig {
     RiskConfig {
@@ -179,4 +180,144 @@ fn test_ghost_fills_trigger_l3() {
     assert_eq!(controller.level(), RiskLevel::L1Normal); // Not yet
     controller.record_ghost_fill();
     assert_eq!(controller.level(), RiskLevel::L3Emergency, "3 ghost fills should trigger L3");
+}
+
+// ── Supplementary Tests ──
+
+#[test]
+fn test_zero_capital_forces_l3() {
+    let mut controller = RiskController::new(&test_risk_config());
+    // Don't set_total_capital → remains 0
+
+    let iirs = vec![("m1".to_string(), Decimal::ZERO)];
+    let prices = vec![("m1".to_string(), Decimal::ZERO)];
+
+    let level = controller.evaluate(&iirs, &prices, 0);
+    assert_eq!(level, RiskLevel::L3Emergency, "Zero capital should force L3");
+}
+
+#[test]
+fn test_force_l2_from_l1_only() {
+    let mut controller = RiskController::new(&test_risk_config());
+    controller.set_total_capital(dec!(10000));
+    assert_eq!(controller.level(), RiskLevel::L1Normal);
+
+    // Force L2 from L1
+    controller.force_l2(RiskTrigger::IirExceeded {
+        market_id: "m1".to_string(),
+        iir: dec!(0.6),
+    });
+    assert_eq!(controller.level(), RiskLevel::L2Warning);
+
+    // Force L2 again — should remain L2 (not downgrade from L3 etc.)
+    controller.force_l3(RiskTrigger::GhostFills { count: 5 });
+    assert_eq!(controller.level(), RiskLevel::L3Emergency);
+
+    // force_l2 should NOT downgrade from L3
+    controller.force_l2(RiskTrigger::IirExceeded {
+        market_id: "m1".to_string(),
+        iir: dec!(0.6),
+    });
+    assert_eq!(controller.level(), RiskLevel::L3Emergency, "force_l2 should not downgrade from L3");
+}
+
+#[test]
+fn test_prune_stale_cancels() {
+    let mut controller = RiskController::new(&test_risk_config());
+
+    controller.register_cancel("order-1".to_string());
+    controller.register_cancel("order-2".to_string());
+    assert!(controller.is_our_cancel("order-1"));
+    assert!(controller.is_our_cancel("order-2"));
+
+    // Prune with a future cutoff (removes everything)
+    let future = chrono::Utc::now() + chrono::TimeDelta::hours(1);
+    controller.prune_stale_cancels(future);
+
+    assert!(!controller.is_our_cancel("order-1"), "Pruned entries should not be found");
+    assert!(!controller.is_our_cancel("order-2"));
+}
+
+#[test]
+fn test_daily_loss_l3_threshold() {
+    let mut controller = RiskController::new(&test_risk_config());
+    controller.set_total_capital(dec!(10000));
+    controller.update_pnl(dec!(-850)); // -8.5% loss, above l3_daily_loss_pct (0.08)
+
+    let iirs = vec![("m1".to_string(), dec!(0.1))];
+    let prices = vec![("m1".to_string(), dec!(0.01))];
+
+    let level = controller.evaluate(&iirs, &prices, 0);
+    assert_eq!(level, RiskLevel::L3Emergency, "-8.5% daily loss should trigger L3");
+}
+
+#[test]
+fn test_manual_recover_clears_ghost_fills() {
+    let mut controller = RiskController::new(&test_risk_config());
+    controller.set_total_capital(dec!(10000));
+
+    // Trigger L3 via ghost fills
+    controller.record_ghost_fill();
+    controller.record_ghost_fill();
+    controller.record_ghost_fill();
+    assert_eq!(controller.level(), RiskLevel::L3Emergency);
+
+    // Manual recover
+    controller.manual_recover();
+    assert_eq!(controller.level(), RiskLevel::L1Normal);
+
+    // Ghost fill count should be reset — one more ghost fill shouldn't trigger L3
+    controller.record_ghost_fill();
+    assert_eq!(controller.level(), RiskLevel::L1Normal, "Ghost fills should be cleared after recovery");
+}
+
+#[test]
+fn test_l2_timeout_escalates_to_l3() {
+    let mut config = test_risk_config();
+    config.l2_timeout_to_l3_secs = 0; // Instant timeout for testing
+    let mut controller = RiskController::new(&config);
+    controller.set_total_capital(dec!(10000));
+
+    // Trigger L2 via IIR
+    let iirs = vec![("m1".to_string(), dec!(0.55))];
+    let prices = vec![("m1".to_string(), dec!(0.02))];
+    let level = controller.evaluate(&iirs, &prices, 0);
+    assert_eq!(level, RiskLevel::L2Warning);
+
+    // Next evaluate: L2 timeout=0 means immediate escalation to L3,
+    // even if conditions have recovered
+    let iirs_ok = vec![("m1".to_string(), dec!(0.1))];
+    let prices_ok = vec![("m1".to_string(), dec!(0.01))];
+    let level = controller.evaluate(&iirs_ok, &prices_ok, 0);
+    assert_eq!(level, RiskLevel::L3Emergency, "L2 timeout should escalate to L3");
+}
+
+#[test]
+fn test_l2_recovery_with_hold_period() {
+    let mut config = test_risk_config();
+    config.l2_recovery_hold_secs = 0; // Instant hold for testing
+    let mut controller = RiskController::new(&config);
+    controller.set_total_capital(dec!(10000));
+
+    // Trigger L2
+    controller.force_l2(RiskTrigger::IirExceeded {
+        market_id: "m1".to_string(),
+        iir: dec!(0.6),
+    });
+    assert_eq!(controller.level(), RiskLevel::L2Warning);
+
+    // Update PnL to non-negative (satisfies PnL recovery condition)
+    controller.update_pnl(Decimal::ZERO);
+
+    // Provide recovery conditions: IIR < l2_recovery_iir, price < l2_recovery_price_change
+    let iirs = vec![("m1".to_string(), dec!(0.1))]; // Well below recovery threshold (0.4)
+    let prices = vec![("m1".to_string(), dec!(0.01))]; // Well below recovery threshold (0.05)
+
+    // First evaluate: starts recovery timer (l2_recovery_started = Some(now))
+    let level = controller.evaluate(&iirs, &prices, 0);
+    assert_eq!(level, RiskLevel::L2Warning, "First call starts recovery timer");
+
+    // Second evaluate: hold_secs=0 has elapsed → transitions to L1
+    let level = controller.evaluate(&iirs, &prices, 0);
+    assert_eq!(level, RiskLevel::L1Normal, "Should recover with hold_secs=0");
 }

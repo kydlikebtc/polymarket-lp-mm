@@ -95,6 +95,16 @@ impl RiskController {
         self.level
     }
 
+    /// Number of ghost fills in the current tracking window (for TUI display)
+    pub fn ghost_fill_count(&self) -> u32 {
+        self.ghost_fill_times.len() as u32
+    }
+
+    /// Timestamp when L2 was entered (for TUI duration display)
+    pub fn l2_entered_at(&self) -> Option<DateTime<Utc>> {
+        self.l2_entered_at
+    }
+
     /// Register a cancel request we initiated
     pub fn register_cancel(&mut self, order_id: String) {
         const MAX_CANCEL_ENTRIES: usize = 5000;
@@ -237,20 +247,20 @@ impl RiskController {
         }
 
         // L2 timeout → L3
-        if self.level == RiskLevel::L2Warning {
-            if let Some(entered_at) = self.l2_entered_at {
-                // R7-SEC3: Use .max(0) to prevent negative duration from clock skew
-                // (NTP correction) wrapping to a huge u64, which would falsely trigger L3.
-                let duration = (Utc::now() - entered_at).num_seconds().max(0) as u64;
-                if duration >= self.config.l2_timeout_to_l3_secs {
-                    self.transition_to(
-                        RiskLevel::L3Emergency,
-                        RiskTrigger::L2Timeout {
-                            duration_secs: duration,
-                        },
-                    );
-                    return self.level;
-                }
+        if self.level == RiskLevel::L2Warning
+            && let Some(entered_at) = self.l2_entered_at
+        {
+            // R7-SEC3: Use .max(0) to prevent negative duration from clock skew
+            // (NTP correction) wrapping to a huge u64, which would falsely trigger L3.
+            let duration = (Utc::now() - entered_at).num_seconds().max(0) as u64;
+            if duration >= self.config.l2_timeout_to_l3_secs {
+                self.transition_to(
+                    RiskLevel::L3Emergency,
+                    RiskTrigger::L2Timeout {
+                        duration_secs: duration,
+                    },
+                );
+                return self.level;
             }
         }
 

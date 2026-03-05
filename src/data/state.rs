@@ -1,3 +1,4 @@
+use alloy::primitives::B256;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use rust_decimal::Decimal;
@@ -25,6 +26,8 @@ pub struct SharedState {
     pub daily_pnl: Arc<RwLock<PnlTracker>>,
     /// Cached market settlement times (market_id → end_date)
     pub settlement_times: Arc<DashMap<String, DateTime<Utc>>>,
+    /// Cached market condition IDs (market_id → condition_id) for CTF merge operations
+    pub condition_ids: Arc<DashMap<String, B256>>,
     /// R5-12: Whether market data WS has ever received a message
     pub market_ws_connected: Arc<AtomicBool>,
     /// R5-12: Whether user events WS has ever received a message
@@ -47,6 +50,7 @@ struct MarketCostBasis {
 /// 1. Startup seeding with approximate midpoint (0.50) for existing positions
 /// 2. No periodic recalibration against actual on-chain balances
 /// 3. Missed WS fill events (rare but possible during reconnection)
+///
 /// For MVP, this is acceptable since PnL is used for risk thresholds (relative),
 /// not for accounting (absolute). Consider periodic recalibration in production.
 #[derive(Debug, Clone)]
@@ -59,6 +63,12 @@ pub struct PnlTracker {
     pub fill_count: u64,
     /// Per-market cost basis (market_id → basis)
     market_bases: HashMap<String, MarketCostBasis>,
+}
+
+impl Default for PnlTracker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PnlTracker {
@@ -251,6 +261,7 @@ impl SharedState {
             token_to_market,
             daily_pnl: Arc::new(RwLock::new(PnlTracker::new())),
             settlement_times: Arc::new(DashMap::new()),
+            condition_ids: Arc::new(DashMap::new()),
             market_ws_connected: Arc::new(AtomicBool::new(false)),
             user_ws_connected: Arc::new(AtomicBool::new(false)),
         }
@@ -262,6 +273,10 @@ impl SharedState {
     }
 
     /// Get 5-minute absolute price change for a market.
+    /// R9-CR5: Uses max-min range (not first-last) to capture intra-window volatility.
+    /// A price that spikes +10% then reverts should still register as high price change,
+    /// not 0% (which first-last would report). This prevents risk under-reporting.
+    ///
     /// Uses absolute change (not relative) because binary market prices near 0 or 1
     /// would cause tiny absolute movements to appear as huge relative changes.
     pub fn price_change_5min(&self, market_id: &str) -> Decimal {
@@ -272,19 +287,25 @@ impl SharedState {
         let now = Utc::now();
         let five_min_ago = now - chrono::TimeDelta::minutes(5);
 
-        let recent: Vec<&PricePoint> = history
-            .iter()
-            .filter(|p| p.timestamp >= five_min_ago)
-            .collect();
+        let mut min_price = Decimal::MAX;
+        let mut max_price = Decimal::ZERO;
+        let mut count = 0u32;
 
-        if recent.len() < 2 {
+        for point in history.iter().filter(|p| p.timestamp >= five_min_ago) {
+            if point.price < min_price {
+                min_price = point.price;
+            }
+            if point.price > max_price {
+                max_price = point.price;
+            }
+            count += 1;
+        }
+
+        if count < 2 {
             return Decimal::ZERO;
         }
 
-        let first = recent.first().unwrap().price;
-        let last = recent.last().unwrap().price;
-
-        (last - first).abs()
+        max_price - min_price
     }
 
     /// Record a new price point (single lock: entry → push + retain)

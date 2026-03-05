@@ -250,15 +250,15 @@ async fn run_user_ws_inner(
                 if let Some(mut our_order) = state.my_orders.get_mut(&order_id) {
                     // R5-19: Cross-validate that WS event matches our local record.
                     let ws_market = state.resolve_market_id(&order.asset_id.to_string());
-                    if let Some(ref ws_mid) = ws_market {
-                        if *ws_mid != our_order.market_id {
-                            warn!(
-                                "WS order event market mismatch: order={order_id}, \
-                                 local={}, ws={ws_mid}. Ignoring.",
-                                our_order.market_id
-                            );
-                            continue;
-                        }
+                    if let Some(ref ws_mid) = ws_market
+                        && *ws_mid != our_order.market_id
+                    {
+                        warn!(
+                            "WS order event market mismatch: order={order_id}, \
+                             local={}, ws={ws_mid}. Ignoring.",
+                            our_order.market_id
+                        );
+                        continue;
                     }
 
                     // Determine new status: prefer SDK `status` field, fall back to `msg_type`
@@ -366,11 +366,17 @@ async fn run_user_ws_inner(
                     pos.updated_at = Utc::now();
                 }
 
-                // Push PnL to risk controller
-                {
+                // R9-CR1: Push PnL to risk controller.
+                // Read PnL first and release RwLock before acquiring Mutex,
+                // to maintain consistent lock ordering (daily_pnl → risk_controller)
+                // and prevent potential deadlock with evaluate_risk.
+                let realized = {
                     let pnl = state.daily_pnl.read().await;
+                    pnl.realized_pnl
+                };
+                {
                     let mut rc = risk_controller.lock().await;
-                    rc.update_pnl(pnl.realized_pnl);
+                    rc.update_pnl(realized);
                 }
             }
             Ok(_other) => {

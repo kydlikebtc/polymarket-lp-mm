@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88.0"
 
+[features]
+default = []
+tui = ["dep:ratatui", "dep:crossterm"]
+
 [dependencies]
 # Polymarket Official SDK
 polymarket-client-sdk = { version = "0.4.3", features = ["clob", "data", "gamma", "ctf", "ws", "heartbeats", "tracing"] }
@@ -40,5 +44,10 @@ uuid = { version = "1.21", features = ["v4"] }
 dashmap = "6.1"
 zeroize = "1"
 
+# TUI (optional, behind "tui" feature)
+ratatui = { version = "0.30", optional = true, features = ["crossterm"] }
+crossterm = { version = "0.28", optional = true, features = ["event-stream"] }
+
 [dev-dependencies]
 tokio-test = "0.4"
+tempfile = "3"
