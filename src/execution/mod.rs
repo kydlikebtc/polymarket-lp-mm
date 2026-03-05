@@ -95,6 +95,7 @@ impl OrderExecutor {
             );
         };
         self.cancel_market_with_retry(tid).await?;
+        state.orders_cancelled_count.fetch_add(order_ids.len() as u64, std::sync::atomic::Ordering::Relaxed);
 
         // Wait for confirmation via WebSocket (with timeout, NO lock held)
         let timeout = Duration::from_millis(self.config.cancel_confirm_timeout_ms);
@@ -230,6 +231,11 @@ impl OrderExecutor {
                     // Continue with next batch (partial success is better than none)
                 }
             }
+        }
+
+        let placed = submitted_ids.len() as u64;
+        if placed > 0 {
+            state.orders_placed_count.fetch_add(placed, std::sync::atomic::Ordering::Relaxed);
         }
 
         info!(

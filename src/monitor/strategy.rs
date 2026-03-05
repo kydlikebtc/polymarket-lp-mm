@@ -13,8 +13,9 @@ use tracing::{info, warn};
 use crate::config::AppConfig;
 use crate::data::SharedState;
 use crate::data::gamma;
+use crate::data::state::OrderSide;
 use crate::execution::OrderExecutor;
-use crate::pricing::PricingEngine;
+use crate::pricing::{PricingEngine, QuoteOrder};
 use crate::risk::{RiskController, RiskLevel};
 
 /// Evaluate risk conditions and return current level
@@ -154,35 +155,7 @@ pub async fn run_market_strategy(
         return Ok(());
     }
 
-    // Step 1: Cancel existing orders (lock acquired briefly inside method)
-    let cancelled_ids = executor.cancel_market_orders(state, market_id, risk_controller).await?;
-
-    // Verify all cancels were confirmed via WS, not just locally timed out.
-    if !cancelled_ids.is_empty() {
-        let still_live = state.my_orders.iter()
-            .filter(|o| o.market_id == market_id && o.status == crate::data::state::OrderStatus::Live)
-            .count();
-        if still_live > 0 {
-            warn!(
-                "Market {market_id} still has {still_live} orders not confirmed cancelled, skipping this round"
-            );
-            return Ok(());
-        }
-    }
-
-    // Safety check: verify WS is still connected before submitting new orders.
-    // Polymarket WS is push-based (only sends on orderbook changes), NOT heartbeat-based.
-    // Quiet markets may have no updates for minutes while the connection is healthy.
-    // Use the connected flag (set false on disconnect, true on reconnect) instead of
-    // message recency, which would false-positive on low-activity markets.
-    if !state.both_ws_connected() {
-        warn!(
-            "WS disconnected, skipping order submission for market={market_id}"
-        );
-        return Ok(());
-    }
-
-    // Step 2: Generate new quotes
+    // Step 1: Generate new quotes BEFORE cancelling, so we can compare with live orders.
     let available_yes_shares = state
         .positions
         .get(market_id)
@@ -204,6 +177,48 @@ pub async fn run_market_strategy(
         return Ok(());
     }
 
+    // Step 2: Compare new quotes with existing live orders.
+    // If all prices and sizes match, skip the cancel+place cycle to preserve
+    // queue priority (price-time FIFO) and reduce ghost fill risk.
+    let live_orders: Vec<(crate::data::state::OrderSide, Decimal, Decimal)> = state
+        .my_orders
+        .iter()
+        .filter(|o| o.market_id == market_id && o.status == crate::data::state::OrderStatus::Live)
+        .map(|o| (o.side, o.price, o.size))
+        .collect();
+
+    if quotes_match_live(&orders, &live_orders) {
+        // Quotes unchanged — no need to cancel and re-place.
+        // Update tracking timestamps to reset the requote timer.
+        last_midpoints.insert(market_id.to_string(), current_midpoint);
+        last_times.insert(market_id.to_string(), now);
+        return Ok(());
+    }
+
+    // Step 3: Cancel existing orders (quotes differ, must replace)
+    let cancelled_ids = executor.cancel_market_orders(state, market_id, risk_controller).await?;
+
+    // Verify all cancels were confirmed via WS, not just locally timed out.
+    if !cancelled_ids.is_empty() {
+        let still_live = state.my_orders.iter()
+            .filter(|o| o.market_id == market_id && o.status == crate::data::state::OrderStatus::Live)
+            .count();
+        if still_live > 0 {
+            warn!(
+                "Market {market_id} still has {still_live} orders not confirmed cancelled, skipping this round"
+            );
+            return Ok(());
+        }
+    }
+
+    // Safety check: verify WS is still connected before submitting new orders.
+    if !state.both_ws_connected() {
+        warn!(
+            "WS disconnected, skipping order submission for market={market_id}"
+        );
+        return Ok(());
+    }
+
     // Estimate Q-Score for logging
     let estimated_q = pricing_engine.estimate_qscore(
         &orders,
@@ -216,7 +231,7 @@ pub async fn run_market_strategy(
         orders.len()
     );
 
-    // Step 3: Submit new orders
+    // Step 4: Submit new orders
     executor.submit_orders(state, orders).await?;
 
     // Update tracking
@@ -224,4 +239,30 @@ pub async fn run_market_strategy(
     last_times.insert(market_id.to_string(), now);
 
     Ok(())
+}
+
+/// Check if new quotes match the currently live orders (same count, sides, prices, sizes).
+/// Returns true if no cancel+replace is needed, preserving queue priority.
+fn quotes_match_live(
+    new_quotes: &[QuoteOrder],
+    live_orders: &[(OrderSide, Decimal, Decimal)],
+) -> bool {
+    if new_quotes.len() != live_orders.len() {
+        return false;
+    }
+
+    // Build sorted tuples for comparison: (side_is_buy, price, size)
+    let mut new_set: Vec<(bool, Decimal, Decimal)> = new_quotes
+        .iter()
+        .map(|q| (matches!(q.side, OrderSide::Buy), q.price, q.size))
+        .collect();
+    new_set.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+    let mut live_set: Vec<(bool, Decimal, Decimal)> = live_orders
+        .iter()
+        .map(|(side, price, size)| (matches!(side, OrderSide::Buy), *price, *size))
+        .collect();
+    live_set.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+    new_set == live_set
 }

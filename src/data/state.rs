@@ -4,7 +4,7 @@ use dashmap::DashMap;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::RwLock;
 
 use crate::config::AppConfig;
@@ -32,6 +32,12 @@ pub struct SharedState {
     pub market_ws_connected: Arc<AtomicBool>,
     /// R5-12: Whether user events WS has ever received a message
     pub user_ws_connected: Arc<AtomicBool>,
+    /// USDC wallet balance (polled from REST API every 60s in position_tick)
+    pub usdc_balance: Arc<RwLock<Decimal>>,
+    /// Cumulative orders placed count (for execution stats display)
+    pub orders_placed_count: Arc<AtomicU64>,
+    /// Cumulative orders cancelled count (for execution stats display)
+    pub orders_cancelled_count: Arc<AtomicU64>,
 }
 
 /// Per-market cost basis for weighted-average PnL tracking.
@@ -264,6 +270,9 @@ impl SharedState {
             condition_ids: Arc::new(DashMap::new()),
             market_ws_connected: Arc::new(AtomicBool::new(false)),
             user_ws_connected: Arc::new(AtomicBool::new(false)),
+            usdc_balance: Arc::new(RwLock::new(Decimal::ZERO)),
+            orders_placed_count: Arc::new(AtomicU64::new(0)),
+            orders_cancelled_count: Arc::new(AtomicU64::new(0)),
         }
     }
 

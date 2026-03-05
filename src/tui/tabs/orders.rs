@@ -47,6 +47,9 @@ fn render_order_table(app: &App, frame: &mut Frame, area: Rect) {
         Cell::from("Size"),
         Cell::from("Status"),
         Cell::from("Age"),
+        Cell::from("Dist"),
+        Cell::from("Q"),
+        Cell::from("Reward"),
     ])
     .style(
         Style::default()
@@ -76,14 +79,33 @@ fn render_order_table(app: &App, frame: &mut Frame, area: Rect) {
                 _ => Style::default(),
             };
 
+            let reward_style = if o.status != "Live" {
+                Style::default().fg(Color::DarkGray)
+            } else if o.reward_eligible {
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Red)
+            };
+
+            let reward_label = if o.status != "Live" {
+                "-".to_string()
+            } else if o.reward_eligible {
+                "YES".to_string()
+            } else {
+                "NO".to_string()
+            };
+
             Row::new(vec![
                 Cell::from(truncate_id(&o.order_id)),
-                Cell::from(o.market_id.chars().take(12).collect::<String>()),
+                Cell::from(truncate_market_name(&o.market_name, 14)),
                 Cell::from(o.side.clone()).style(side_style),
                 Cell::from(format!("{:.4}", o.price)),
                 Cell::from(format!("{:.1}", o.size)),
                 Cell::from(o.status.clone()).style(status_style),
                 Cell::from(format_age(o.age_secs)),
+                Cell::from(format!("{:.3}", o.distance_from_mid)),
+                Cell::from(format!("{:.1}", o.q_contribution)),
+                Cell::from(reward_label).style(reward_style),
             ])
         })
         .collect();
@@ -108,6 +130,9 @@ fn render_order_table(app: &App, frame: &mut Frame, area: Rect) {
             Constraint::Length(8),
             Constraint::Length(10),
             Constraint::Length(8),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Length(7),
         ],
     )
     .header(header)
@@ -138,6 +163,14 @@ fn truncate_id(id: &str) -> String {
         id.to_string()
     } else {
         format!("{}..{}", &id[..4], &id[id.len() - 4..])
+    }
+}
+
+fn truncate_market_name(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len - 3])
     }
 }
 

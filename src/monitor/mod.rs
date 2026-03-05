@@ -161,6 +161,18 @@ pub async fn run_orchestrator(
         }
     }
 
+    // Fetch initial USDC balance for TUI display
+    match executor.client().fetch_collateral_balance().await {
+        Ok(balance) => {
+            let mut bal = state.usdc_balance.write().await;
+            *bal = balance;
+            info!("Initial USDC balance: ${balance}");
+        }
+        Err(e) => {
+            warn!("Failed to fetch initial USDC balance: {e:#}");
+        }
+    }
+
     // Fetch settlement times and condition IDs from Gamma API
     let gamma_client = GammaClient::new(&config.api.gamma_base_url)?;
     let market_token_pairs: Vec<(String, String)> = config.markets.iter()
@@ -312,6 +324,18 @@ pub async fn run_orchestrator(
                         }
                     }
                 }
+
+                // Poll USDC wallet balance for TUI display
+                match executor.client().fetch_collateral_balance().await {
+                    Ok(balance) => {
+                        let mut bal = state.usdc_balance.write().await;
+                        *bal = balance;
+                        debug!("USDC balance updated: ${balance}");
+                    }
+                    Err(e) => {
+                        warn!("Failed to poll USDC balance: {e:#}");
+                    }
+                }
             }
 
             // Metrics logging (every 60 seconds)
@@ -373,7 +397,7 @@ pub async fn run_orchestrator(
                 #[cfg(feature = "tui")]
                 if let Some(ref tx) = tui_snapshot_tx {
                     let snap = crate::tui::snapshot::collect_snapshot(
-                        &config, &state, &risk_controller,
+                        &config, &state, &risk_controller, &pricing_engine,
                     ).await;
                     let _ = tx.try_send(snap);
                 }
