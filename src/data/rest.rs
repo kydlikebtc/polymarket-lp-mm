@@ -14,7 +14,7 @@ use polymarket_client_sdk::auth::{Credentials, Normal};
 use polymarket_client_sdk::clob::types::request::{
     BalanceAllowanceRequest, CancelMarketOrderRequest, OrdersRequest,
 };
-use polymarket_client_sdk::clob::types::{AssetType, OrderType, Side};
+use polymarket_client_sdk::clob::types::{AssetType, OrderType, Side, SignatureType};
 use polymarket_client_sdk::POLYGON;
 
 use crate::config::AppConfig;
@@ -280,15 +280,24 @@ pub async fn create_clob_client(
     private_key.zeroize();
 
     let address = signer.address();
-    debug!("Wallet address: {address}");
+    debug!("Signer EOA address: {address}");
 
-    // Authenticate with SDK — builds an Authenticated<Normal> client
+    // Log the auto-derived proxy wallet address for verification
+    if let Some(proxy) = polymarket_client_sdk::derive_proxy_wallet(address, POLYGON) {
+        info!("Proxy wallet (funder): {proxy}");
+    }
+
+    // Authenticate with SDK — builds an Authenticated<Normal> client.
+    // Uses Proxy signature type (type=1) for Polymarket proxy wallet users
+    // (Magic/email accounts). The SDK auto-derives the proxy wallet address
+    // from the EOA signer via CREATE2.
     let sdk = polymarket_client_sdk::clob::Client::new(
         &config.api.clob_base_url,
-        polymarket_client_sdk::clob::Config::default(),
+        polymarket_client_sdk::clob::Config::builder().build(),
     )
     .context("Failed to create CLOB client")?
     .authentication_builder(&signer)
+    .signature_type(SignatureType::Proxy)
     .authenticate()
     .await
     .context("Failed to authenticate with Polymarket CLOB API")?;

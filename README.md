@@ -29,16 +29,38 @@ cargo build --release --features tui
 cp .env.example .env
 ```
 
-编辑 `.env`，填入你的 Polymarket 凭证：
+编辑 `.env`，填入 4 个凭证（获取方式见下文）：
 
 ```env
+POLYMARKET_PRIVATE_KEY=0xyour_private_key_here
 POLYMARKET_API_KEY=your_api_key_here
 POLYMARKET_API_SECRET=your_api_secret_here
 POLYMARKET_API_PASSPHRASE=your_passphrase_here
-POLYMARKET_PRIVATE_KEY=0xyour_private_key_here
 ```
 
-> **安全提示**：私钥在启动时读取后立即从环境变量中清除（`remove_var`），运行期内存中不保留原始私钥。
+**如何获取这 4 个凭证：**
+
+1. **导出私钥** — 登录 [Polymarket](https://polymarket.com)，进入 Settings → [Export Private Key](https://polymarket.com/settings?tab=export-private-key)。邮箱注册用户也可通过 [Magic Link](https://reveal.magic.link/polymarket) 导出。
+
+2. **派生 API 凭证** — 用 Polymarket 官方 Python 工具一次性生成 API Key / Secret / Passphrase（只需执行一次）：
+
+   ```bash
+   pip install py-clob-client
+   python -c "
+   from py_clob_client.client import ClobClient
+   client = ClobClient('https://clob.polymarket.com', key='你的私钥', chain_id=137)
+   # 邮箱注册用户改用:
+   # client = ClobClient('https://clob.polymarket.com', key='你的私钥', chain_id=137, signature_type=1, funder='你的充值地址')
+   creds = client.create_or_derive_api_creds()
+   print(f'POLYMARKET_API_KEY={creds.api_key}')
+   print(f'POLYMARKET_API_SECRET={creds.api_secret}')
+   print(f'POLYMARKET_API_PASSPHRASE={creds.api_passphrase}')
+   "
+   ```
+
+3. 将输出的 3 个值连同私钥一起填入 `.env` 文件。
+
+> **安全提示**：私钥在启动时读取后立即从环境变量中清除（`remove_var`），运行期内存中不保留原始私钥。凭证派生是确定性的，同一私钥每次派生结果相同。
 
 ### 3. 配置策略
 

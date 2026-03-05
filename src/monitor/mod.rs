@@ -163,8 +163,10 @@ pub async fn run_orchestrator(
 
     // Fetch settlement times and condition IDs from Gamma API
     let gamma_client = GammaClient::new(&config.api.gamma_base_url)?;
-    let market_ids: Vec<String> = config.markets.iter().map(|m| m.market_id.clone()).collect();
-    let (settlement_map, condition_map) = gamma_client.fetch_all_metadata(&market_ids).await;
+    let market_token_pairs: Vec<(String, String)> = config.markets.iter()
+        .map(|m| (m.market_id.clone(), m.token_id.clone()))
+        .collect();
+    let (settlement_map, condition_map) = gamma_client.fetch_all_metadata(&market_token_pairs).await;
     for (market_id, end_date) in &settlement_map {
         state.settlement_times.insert(market_id.clone(), *end_date);
         let hours = gamma::hours_until(end_date).unwrap_or(0.0);
@@ -327,7 +329,7 @@ pub async fn run_orchestrator(
             // R8-CR3: Use fetch_all_metadata instead of fetch_all_end_dates
             // to also refresh condition_ids (needed for CTF merge operations).
             _ = settlement_tick.tick() => {
-                let (settlement_map, condition_map) = gamma_client.fetch_all_metadata(&market_ids).await;
+                let (settlement_map, condition_map) = gamma_client.fetch_all_metadata(&market_token_pairs).await;
                 for (market_id, end_date) in &settlement_map {
                     state.settlement_times.insert(market_id.clone(), *end_date);
                 }

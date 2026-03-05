@@ -39,6 +39,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # Error handling
 anyhow = "1.0"
 
+# TLS crypto provider (required by rustls 0.23+)
+rustls = { version = "0.23", features = ["ring"] }
+
 # Utils
 uuid = { version = "1.21", features = ["v4"] }
 dashmap = "6.1"

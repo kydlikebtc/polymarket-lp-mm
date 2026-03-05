@@ -30,6 +30,12 @@ fn read_and_clear_secrets() -> Result<(String, String, String, String)> {
 }
 
 fn main() -> Result<()> {
+    // Install rustls crypto provider before any TLS connections are made.
+    // rustls 0.23+ requires an explicit provider; without this, WS/HTTP threads panic.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls CryptoProvider");
+
     // TUI mode: redirect tracing to file (TUI owns the terminal)
     #[cfg(feature = "tui")]
     {

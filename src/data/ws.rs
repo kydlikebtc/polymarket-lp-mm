@@ -79,6 +79,11 @@ async fn run_market_ws_inner(
 
     info!("Market WebSocket connected, subscribed to {} assets", asset_ids.len());
 
+    // Mark market WS as connected immediately after subscription succeeds.
+    // This avoids a brief window where both_ws_connected() returns false
+    // between connection and the first orderbook snapshot.
+    state.market_ws_connected.store(true, Ordering::Release);
+
     // Update WS heartbeat
     {
         let mut last_msg = state.ws_last_message.write().await;
@@ -109,15 +114,19 @@ async fn run_market_ws_inner(
                     continue;
                 };
 
-                // Extract best bid/ask from the book
+                // Extract best bid (highest) / best ask (lowest) from the book.
+                // Uses iter().max()/min() instead of first() because the SDK's
+                // sort order is not guaranteed — relying on first() produced
+                // spread=0.998 (lowest bid vs highest ask) instead of the true BBO.
                 // R8-SEC10: Validate price range for binary markets [0.001, 0.999].
-                // Rejects anomalous WS data that could poison midpoint/IIR calculations.
-                let best_bid = book.bids.first().map(|b| b.price).filter(|p| {
-                    *p > Decimal::ZERO && *p < Decimal::ONE
-                });
-                let best_ask = book.asks.first().map(|a| a.price).filter(|p| {
-                    *p > Decimal::ZERO && *p < Decimal::ONE
-                });
+                let best_bid = book.bids.iter()
+                    .map(|b| b.price)
+                    .filter(|p| *p > Decimal::ZERO && *p < Decimal::ONE)
+                    .max();
+                let best_ask = book.asks.iter()
+                    .map(|a| a.price)
+                    .filter(|p| *p > Decimal::ZERO && *p < Decimal::ONE)
+                    .min();
 
                 // R6-6: Read midpoint and drop DashMap RefMut before calling record_price,
                 // to avoid holding market_states entry across another DashMap access.
@@ -228,12 +237,21 @@ async fn run_user_ws_inner(
 
     info!("User WebSocket connected and authenticated");
 
+    // Mark user WS as connected immediately after authentication succeeds.
+    // Previously this was only set on first event receipt, causing a cold-start deadlock:
+    // no orders → no user events → flag stays false → strategy never starts → no orders.
+    state.user_ws_connected.store(true, Ordering::Release);
+
+    // Initialize user WS heartbeat so disconnect detection starts from connection time
+    {
+        let mut last_msg = state.user_ws_last_message.write().await;
+        *last_msg = Utc::now();
+    }
+
     let mut received_any = false;
 
     while let Some(event) = stream.next().await {
         received_any = true;
-        // R5-12 + R6-8: Mark user WS as having received data (Release for ARM)
-        state.user_ws_connected.store(true, Ordering::Release);
 
         // Update user WS heartbeat for disconnect detection
         {

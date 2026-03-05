@@ -344,11 +344,18 @@ impl SharedState {
         (Utc::now() - last).num_seconds().max(0) as u64
     }
 
-    /// Max disconnect seconds across both WebSocket connections
+    /// Disconnect duration for risk evaluation.
+    ///
+    /// Polymarket WS is push-based (data only on orderbook changes), so message
+    /// recency alone cannot distinguish "quiet market" from "broken connection".
+    /// Returns 0 when the market WS connected flag is true (connection alive),
+    /// and actual elapsed seconds when disconnected.
     pub async fn max_ws_disconnect_secs(&self) -> u64 {
-        let market_secs = self.ws_disconnect_secs().await;
-        let user_secs = self.user_ws_disconnect_secs().await;
-        market_secs.max(user_secs)
+        if self.market_ws_connected.load(Ordering::Acquire) {
+            0
+        } else {
+            self.ws_disconnect_secs().await
+        }
     }
 
     /// R5-12: Check if both WebSocket connections have received at least one message.

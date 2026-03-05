@@ -171,10 +171,13 @@ pub async fn run_market_strategy(
     }
 
     // Safety check: verify WS is still connected before submitting new orders.
-    let ws_gap = state.max_ws_disconnect_secs().await;
-    if ws_gap > 10 {
+    // Polymarket WS is push-based (only sends on orderbook changes), NOT heartbeat-based.
+    // Quiet markets may have no updates for minutes while the connection is healthy.
+    // Use the connected flag (set false on disconnect, true on reconnect) instead of
+    // message recency, which would false-positive on low-activity markets.
+    if !state.both_ws_connected() {
         warn!(
-            "WS stale for {ws_gap}s, skipping order submission for market={market_id} to avoid blind exposure"
+            "WS disconnected, skipping order submission for market={market_id}"
         );
         return Ok(());
     }
