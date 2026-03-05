@@ -1,0 +1,124 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 策略B: 平衡型 (Balanced)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# 适用场景:
+#   - 资金 $2,000-$5,000，有一定做市经验
+#   - 中等周期市场 (季度财报、政策事件、中期选举)
+#   - 概率 25%-75% 的活跃市场
+#
+# 特点:
+#   - 适中价差 (0.8 cent base)，平衡逆向选择与成交量
+#   - 内层资金占比提升 → 更高 Q-Score 效率
+#   - 中等风控阈值，允许一定持仓偏移
+#   - 支持多市场分散 (2-3 个市场)
+#   - 预期年化: 10%-25% (含流动性奖励)
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# ── 市场配置 ──
+# 建议 2-3 个市场，分散风险，提升奖励覆盖面
+# market_id 和 token_id 从 Polymarket API 获取:
+#   GET https://clob.polymarket.com/markets/{condition_id}
+#   GET https://gamma-api.polymarket.com/markets?slug=xxx
+
+[[markets]]
+market_id = "REPLACE_WITH_MARKET_ID_1"
+token_id  = "REPLACE_WITH_TOKEN_ID_1"
+name      = "Market A"
+max_incentive_spread = 0.03
+min_size  = 10                 # $10 每单 (提升 Q-Score 贡献)
+
+[[markets]]
+market_id = "REPLACE_WITH_MARKET_ID_2"
+token_id  = "REPLACE_WITH_TOKEN_ID_2"
+name      = "Market B"
+max_incentive_spread = 0.03
+min_size  = 10
+
+# 可选第 3 个市场 (取消注释启用)
+# [[markets]]
+# market_id = "REPLACE_WITH_MARKET_ID_3"
+# token_id  = "REPLACE_WITH_TOKEN_ID_3"
+# name      = "Market C"
+# max_incentive_spread = 0.03
+# min_size  = 10
+
+# ── 资金分配 ──
+[capital]
+total_capital           = 3000   # $3,000 USDC
+max_per_market_fraction = 0.50   # 单市场最多 50%，强制分散
+
+# ── 定价引擎 ──
+[pricing]
+base_half_spread      = 0.008    # 0.8 cent 基础价差 (略窄于保守型)
+vaf_min               = 0.7      # 波动率因子下限 (允许更多压缩)
+vaf_max               = 2.5      # 波动率因子上限
+skew_factor           = 0.020    # 适度偏斜 (IIR=1 时偏移 2 cents)
+requote_threshold     = 0.006    # 中间价变化 0.6c 才重报价
+requote_interval_secs = 30       # 30 秒定时重报价
+baseline_volatility   = 0.030    # 基准日波动率 3%
+
+# 3 层阶梯: 加大内层 → 更高 Q-Score
+# Q-Score = ((max_spread - distance) / max_spread)² × size
+# 内层 0.5c 距离: Q 系数 ≈ 0.69 (高效)
+# 中层 1.2c 距离: Q 系数 ≈ 0.36
+# 外层 2.0c 距离: Q 系数 ≈ 0.11
+[[pricing.layers]]
+distance         = 0.005        # 距中间价 0.5 cents (高 Q-Score 区)
+capital_fraction = 0.40         # 内层 40% 资金 → Q-Score 主力
+
+[[pricing.layers]]
+distance         = 0.012        # 距中间价 1.2 cents
+capital_fraction = 0.35         # 中层 35% 资金
+
+[[pricing.layers]]
+distance         = 0.020        # 距中间价 2.0 cents
+capital_fraction = 0.25         # 外层 25% 资金 → 缓冲层
+
+# ── 持仓管理 ──
+[position]
+iir_medium_threshold  = 0.45    # IIR 45% 开始警觉
+iir_extreme_threshold = 0.65    # IIR 65% 紧急
+min_merge_size        = 80      # $80 起触发 Merge
+merge_cooldown_secs   = 180     # 3 分钟 Merge 冷却 (更积极清仓)
+
+# ── 风控系统 ──
+[risk]
+# L2 触发 (适中阈值)
+l2_iir_threshold       = 0.45   # |IIR| ≥ 45% → L2
+l2_price_change_5min   = 0.05   # 5 分钟价格变化 ≥ 5 cents → L2
+l2_daily_loss_pct      = 0.03   # 日亏损 ≥ 3% 总资金 → L2
+l2_ws_disconnect_secs  = 45     # WS 断连 45 秒 → L2
+
+# L3 触发 (紧急停止)
+l3_iir_threshold       = 0.70
+l3_price_change_5min   = 0.20
+l3_daily_loss_pct      = 0.06   # 日亏损 6% → 全停
+l3_ghost_fill_count    = 3
+l3_ghost_fill_window_secs = 1800
+
+# L2 行为
+l2_timeout_to_l3_secs  = 3600   # L2 持续 1 小时 → 升级 L3
+l2_recovery_iir        = 0.35   # IIR 降到 35% 才恢复
+l2_recovery_price_change = 0.025
+l2_recovery_hold_secs  = 180    # 恢复条件持续 3 分钟 (更快恢复)
+l2_size_multiplier     = 0.5    # L2 时订单量缩减到 50%
+l2_spread_multiplier   = 1.8    # L2 时价差扩大到 180%
+
+# ── 执行层 ──
+[execution]
+batch_size              = 15
+max_retries             = 3
+base_retry_delay_ms     = 800
+max_retry_delay_ms      = 8000
+cancel_confirm_timeout_ms = 5000
+
+# ── API 端点 ──
+[api]
+clob_base_url   = "https://clob.polymarket.com"
+gamma_base_url  = "https://gamma-api.polymarket.com"
+ws_market_url   = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+ws_user_url     = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
+polygon_rpc_url = "https://polygon-rpc.com"
+ctf_contract    = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"

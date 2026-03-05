@@ -1,0 +1,88 @@
+# Polymarket MM Bot Configuration
+# Copy to config.toml and adjust values before running.
+
+# ── Markets ──
+# Add one [[markets]] block per market you want to make.
+# market_id: from Polymarket URL (e.g. "0x...")
+# token_id: the YES token ID for this market
+# name: display name (for logs/TUI)
+# max_incentive_spread: max spread to earn USDC rewards (check Polymarket docs)
+# min_size: minimum order size in shares
+
+[[markets]]
+market_id = "YOUR_MARKET_ID_HERE"
+token_id  = "YOUR_TOKEN_ID_HERE"
+name      = "Example Market"
+max_incentive_spread = 0.03
+min_size  = 5
+
+# ── Capital ──
+[capital]
+total_capital          = 1000    # Total USDC to deploy (max 1,000,000)
+max_per_market_fraction = 0.50   # Max fraction of capital per market
+
+# ── Pricing ──
+[pricing]
+base_half_spread     = 0.005    # Base half-spread (e.g. 0.005 = 0.5%)
+vaf_min              = 0.5      # Volatility adjustment factor min
+vaf_max              = 3.0      # Volatility adjustment factor max
+skew_factor          = 0.02     # Quote skewing intensity
+requote_threshold    = 0.005    # Min midpoint change to trigger requote
+requote_interval_secs = 30      # Minimum seconds between requotes
+baseline_volatility  = 0.025    # Baseline volatility for VAF calculation
+
+# Ladder layers: distance from mid + capital fraction
+[[pricing.layers]]
+distance         = 0.005
+capital_fraction = 0.40
+
+[[pricing.layers]]
+distance         = 0.010
+capital_fraction = 0.35
+
+# ── Position Management ──
+[position]
+iir_medium_threshold  = 0.5     # IIR threshold for L2 escalation
+iir_extreme_threshold = 0.75    # IIR threshold for L3 escalation
+min_merge_size        = 100     # Minimum shares to trigger CTF merge
+merge_cooldown_secs   = 600     # Cooldown between merges (seconds)
+
+# ── Risk Control ──
+[risk]
+# L2 (Warning) triggers
+l2_iir_threshold       = 0.5
+l2_price_change_5min   = 0.10
+l2_daily_loss_pct      = 0.03
+l2_ws_disconnect_secs  = 30
+
+# L3 (Emergency) triggers
+l3_iir_threshold       = 0.75
+l3_price_change_5min   = 0.20
+l3_daily_loss_pct      = 0.08
+l3_ghost_fill_count    = 3
+l3_ghost_fill_window_secs = 1800
+
+# L2 behavior
+l2_timeout_to_l3_secs  = 7200   # L2 auto-escalates to L3 after 2 hours
+l2_recovery_iir        = 0.4    # IIR must drop below this to start recovery
+l2_recovery_price_change = 0.05
+l2_recovery_hold_secs  = 300    # Hold recovery conditions for 5 min
+l2_size_multiplier     = 0.5    # Reduce order sizes in L2
+l2_spread_multiplier   = 1.5    # Widen spreads in L2
+
+# ── Execution ──
+[execution]
+batch_size              = 10
+max_retries             = 3
+base_retry_delay_ms     = 500
+max_retry_delay_ms      = 5000
+cancel_confirm_timeout_ms = 3000
+
+# ── API Endpoints ──
+[api]
+clob_base_url  = "https://clob.polymarket.com"
+gamma_base_url = "https://gamma-api.polymarket.com"
+ws_market_url  = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+ws_user_url    = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
+polygon_rpc_url = "https://polygon-rpc.com"
+ctf_contract   = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"

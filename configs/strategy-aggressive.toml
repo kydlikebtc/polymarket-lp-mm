@@ -1,0 +1,150 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 策略C: 激进型 (Aggressive)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# 适用场景:
+#   - 资金 $5,000+，有做市经验，理解逆向选择风险
+#   - 短周期高活跃市场 (周内事件、体育赛事、快速结算)
+#   - 概率 30%-70% 的高流动性市场
+#
+# 特点:
+#   - 窄价差 (0.5 cent base)，最大化 Q-Score 效率
+#   - 资金高度集中内层 → 二次方衰减下效率最大化
+#   - 宽松风控阈值，容忍较大持仓偏移
+#   - 多市场覆盖 (3-5 个市场)
+#   - 预期年化: 20%-40% (含流动性奖励)
+#
+# ⚠️ 警告:
+#   - 窄价差 = 高逆向选择风险 (信息不对称时亏损更快)
+#   - 需要稳定网络连接 (WS 断连时暴露更大)
+#   - 建议先用保守型运行 1-2 周后再切换
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# ── 市场配置 ──
+# 3-5 个市场，最大化奖励覆盖面
+# 选择标准:
+#   1. 日奖励池 / 合格流动性 > 0.0001 (高激励密度)
+#   2. 日交易量 > $100K (充足流动性)
+#   3. 概率在 30%-70% (双边报价均有效)
+#   4. 距结算 > 7 天 (避免 TF 时间因子过高)
+
+[[markets]]
+market_id = "REPLACE_WITH_MARKET_ID_1"
+token_id  = "REPLACE_WITH_TOKEN_ID_1"
+name      = "High Volume Market A"
+max_incentive_spread = 0.03
+min_size  = 20                 # $20 每单 (最大化 Q-Score)
+
+[[markets]]
+market_id = "REPLACE_WITH_MARKET_ID_2"
+token_id  = "REPLACE_WITH_TOKEN_ID_2"
+name      = "High Volume Market B"
+max_incentive_spread = 0.03
+min_size  = 20
+
+[[markets]]
+market_id = "REPLACE_WITH_MARKET_ID_3"
+token_id  = "REPLACE_WITH_TOKEN_ID_3"
+name      = "High Volume Market C"
+max_incentive_spread = 0.03
+min_size  = 15
+
+# 可选第 4-5 个市场
+# [[markets]]
+# market_id = "REPLACE_WITH_MARKET_ID_4"
+# token_id  = "REPLACE_WITH_TOKEN_ID_4"
+# name      = "Market D"
+# max_incentive_spread = 0.03
+# min_size  = 15
+
+# [[markets]]
+# market_id = "REPLACE_WITH_MARKET_ID_5"
+# token_id  = "REPLACE_WITH_TOKEN_ID_5"
+# name      = "Market E"
+# max_incentive_spread = 0.03
+# min_size  = 15
+
+# ── 资金分配 ──
+[capital]
+total_capital           = 5000   # $5,000 USDC
+max_per_market_fraction = 0.40   # 单市场最多 40%，强制分散到 3+ 市场
+
+# ── 定价引擎 ──
+[pricing]
+base_half_spread      = 0.005    # 0.5 cent 基础价差 (激进窄价差)
+vaf_min               = 0.6      # 波动率因子下限 (最多压缩 40%)
+vaf_max               = 2.0      # 波动率因子上限 (限制扩张保持报价)
+skew_factor           = 0.025    # 强偏斜 (IIR=1 时偏移 2.5 cents，积极回仓)
+requote_threshold     = 0.004    # 中间价变化 0.4c 即重报价 (跟价更快)
+requote_interval_secs = 15       # 15 秒定时重报价 (高频更新)
+baseline_volatility   = 0.035    # 基准日波动率 3.5%
+
+# 3 层阶梯: 资金集中内层 → Q-Score 最大化
+# Q-Score = ((max_spread - distance) / max_spread)² × size
+#
+# 内层 0.3c 距离 (max_spread=3c): Q 系数 ≈ 0.81 (极高效)
+# 中层 0.8c 距离: Q 系数 ≈ 0.54
+# 外层 1.5c 距离: Q 系数 ≈ 0.25
+#
+# 与保守型对比:
+#   保守型内层 Q 系数 0.54 × 35% = 0.189 有效资金
+#   激进型内层 Q 系数 0.81 × 50% = 0.405 有效资金 (2.1x 效率)
+[[pricing.layers]]
+distance         = 0.003        # 距中间价 0.3 cents (极高 Q-Score 区)
+capital_fraction = 0.50         # 内层 50% 资金 → Q-Score 核心
+
+[[pricing.layers]]
+distance         = 0.008        # 距中间价 0.8 cents
+capital_fraction = 0.30         # 中层 30% 资金
+
+[[pricing.layers]]
+distance         = 0.015        # 距中间价 1.5 cents
+capital_fraction = 0.20         # 外层 20% 资金 → 最小缓冲
+
+# ── 持仓管理 ──
+[position]
+iir_medium_threshold  = 0.50    # IIR 50% 开始警觉 (容忍更大偏移)
+iir_extreme_threshold = 0.75    # IIR 75% 紧急
+min_merge_size        = 100     # $100 起触发 Merge
+merge_cooldown_secs   = 120     # 2 分钟 Merge 冷却 (积极清仓)
+
+# ── 风控系统 ──
+[risk]
+# L2 触发 (宽松阈值: 容忍更大波动)
+l2_iir_threshold       = 0.50   # |IIR| ≥ 50% → L2
+l2_price_change_5min   = 0.06   # 5 分钟价格变化 ≥ 6 cents → L2
+l2_daily_loss_pct      = 0.04   # 日亏损 ≥ 4% 总资金 → L2
+l2_ws_disconnect_secs  = 20     # WS 断连 20 秒 → L2 (窄价差需要更快响应)
+
+# L3 触发 (紧急停止: 绝对底线)
+l3_iir_threshold       = 0.80
+l3_price_change_5min   = 0.25
+l3_daily_loss_pct      = 0.08   # 日亏损 8% → 全停
+l3_ghost_fill_count    = 5      # 更宽容 (活跃市场 ghost fill 更常见)
+l3_ghost_fill_window_secs = 1800
+
+# L2 行为 (快速恢复: 减少停机时间)
+l2_timeout_to_l3_secs  = 1800   # L2 持续 30 分钟 → 升级 L3 (更快升级)
+l2_recovery_iir        = 0.40   # IIR 降到 40% 才恢复
+l2_recovery_price_change = 0.03
+l2_recovery_hold_secs  = 120    # 恢复条件持续 2 分钟 (快速恢复)
+l2_size_multiplier     = 0.6    # L2 时订单量缩减到 60% (保持更多敞口)
+l2_spread_multiplier   = 1.5    # L2 时价差扩大到 150% (温和扩张)
+
+# ── 执行层 ──
+[execution]
+batch_size              = 20     # 更大批次 (多市场多层)
+max_retries             = 3
+base_retry_delay_ms     = 500    # 更快重试
+max_retry_delay_ms      = 5000
+cancel_confirm_timeout_ms = 3000 # 更短超时
+
+# ── API 端点 ──
+[api]
+clob_base_url   = "https://clob.polymarket.com"
+gamma_base_url  = "https://gamma-api.polymarket.com"
+ws_market_url   = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+ws_user_url     = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
+polygon_rpc_url = "https://polygon-rpc.com"
+ctf_contract    = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
