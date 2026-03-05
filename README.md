@@ -2,31 +2,210 @@
 
 Polymarket 预测市场的自动化做市（Market Making）系统，基于 Q-Score 奖励机制设计，兼顾持仓安全与奖励最大化。
 
+## 快速开始
+
+### 环境要求
+
+- Rust 1.88+ (Edition 2024)
+- Polygon 网络 USDC 余额
+- Polymarket CLOB API 凭证（[申请入口](https://docs.polymarket.com/)）
+
+### 1. 克隆与编译
+
+```bash
+git clone https://github.com/kydlikebtc/polymarket-lp-mm.git
+cd polymarket-lp-mm
+
+# Headless 模式（纯日志输出）
+cargo build --release
+
+# TUI 仪表盘模式（终端实时面板）
+cargo build --release --features tui
+```
+
+### 2. 配置 API 密钥
+
+```bash
+cp .env.example .env
+```
+
+编辑 `.env`，填入你的 Polymarket 凭证：
+
+```env
+POLYMARKET_API_KEY=your_api_key_here
+POLYMARKET_API_SECRET=your_api_secret_here
+POLYMARKET_API_PASSPHRASE=your_passphrase_here
+POLYMARKET_PRIVATE_KEY=0xyour_private_key_here
+```
+
+> **安全提示**：私钥在启动时读取后立即从环境变量中清除（`remove_var`），运行期内存中不保留原始私钥。
+
+### 3. 配置策略
+
+项目提供 3 个预设策略模板，按风险偏好选择：
+
+```bash
+# 方式一：使用预设策略（推荐新手从保守型开始）
+cp configs/strategy-conservative.toml config.toml
+
+# 方式二：从空白模板开始
+cp config.example.toml config.toml
+```
+
+编辑 `config.toml`，**必须替换**以下占位符：
+
+```toml
+[[markets]]
+market_id = "REPLACE_WITH_MARKET_ID"   # ← 替换为实际 condition_id
+token_id  = "REPLACE_WITH_TOKEN_ID"    # ← 替换为实际 YES token ID
+name      = "My First Market"
+```
+
+**获取 market_id 和 token_id**：
+
+```bash
+# 方式一：通过市场 slug 查询
+curl -s "https://gamma-api.polymarket.com/markets?slug=will-trump-win-2028" | jq '.[0] | {condition_id, tokens}'
+
+# 方式二：直接通过 CLOB API
+curl -s "https://clob.polymarket.com/markets/YOUR_CONDITION_ID"
+```
+
+### 4. 启动
+
+```bash
+# Headless 模式（日志输出到 stderr）
+cargo run --release
+
+# TUI 仪表盘模式（日志写入 bot.log）
+cargo run --release --features tui
+
+# 调整日志级别
+RUST_LOG=polymarket_mm=debug cargo run --release
+```
+
+### 5. 运行测试
+
+```bash
+cargo test           # 运行全部 75 个测试
+cargo test -- -q     # 静默模式
+```
+
 ---
 
-## 文档目录
+## 预设策略
 
-> 先读 `00-system-overview`，再按序阅读各模块文档。
+`configs/` 目录包含 3 个策略模板，覆盖不同风险偏好：
 
-| 文档 | 内容概要 |
-|------|---------|
-| [00-system-overview](./docs/00-system-overview.md) | 系统架构、完整数据流图、启动顺序、技术约束 |
-| [01-data-layer](./docs/01-data-layer.md) | WebSocket 实时推送、REST 轮询、断线重连、本地状态缓存 |
-| [02-qscore-rewards](./docs/02-qscore-rewards.md) | Q-Score 公式推导、二次衰减、双边 3 倍效应、激励密度 |
-| [03-pricing-engine](./docs/03-pricing-engine.md) | 基础价差计算、VAF/IIF/TF 三因子动态调整、阶梯挂单设计 |
-| [04-position-management](./docs/04-position-management.md) | IIR 持仓失衡度、Quote Skewing、Merge 完整流程与决策树 |
-| [05-risk-control](./docs/05-risk-control.md) | L1/L2/L3 三级状态机、Ghost Fills 攻击检测、恢复流程 |
-| [06-execution-layer](./docs/06-execution-layer.md) | 订单生命周期、EIP-712 签名、批量操作、链上 Merge 调用 |
+| 策略 | 文件 | 资金 | 市场数 | 基础价差 | 内层距离 | 年化预期 |
+| ------ | ------ | ------ | -------- | --------- | --------- | --------- |
+| 保守型 | `strategy-conservative.toml` | $1,000 | 1 | 1.0c | 0.8c | 5-15% |
+| 平衡型 | `strategy-balanced.toml` | $3,000 | 2-3 | 0.8c | 0.5c | 10-25% |
+| 激进型 | `strategy-aggressive.toml` | $5,000+ | 3-5 | 0.5c | 0.3c | 20-40% |
+
+### 策略选择建议
+
+- **首次运行** → 保守型。宽价差 + 低风控阈值，适合熟悉系统行为
+- **稳定运行 1-2 周后** → 平衡型。多市场分散，适度提升 Q-Score 效率
+- **有做市经验** → 激进型。窄价差集中内层，最大化 Q-Score，但逆向选择风险显著增加
+
+### 关键参数说明
+
+```toml
+[pricing]
+base_half_spread = 0.008    # 基础半价差（越小越激进，成交更多但逆向选择风险更大）
+skew_factor      = 0.020    # 偏斜因子（IIR=1 时报价偏移量，越大调仓越快）
+
+[[pricing.layers]]
+distance         = 0.005    # 距中间价距离（越近 Q-Score 越高，风险也越大）
+capital_fraction = 0.40     # 该层资金占比
+
+[risk]
+l2_iir_threshold     = 0.45 # 持仓失衡达到 45% 触发 L2 预警
+l2_daily_loss_pct    = 0.03 # 日亏损 3% 触发 L2 预警
+l3_daily_loss_pct    = 0.06 # 日亏损 6% 触发 L3 紧急停止
+```
 
 ---
 
-## 核心设计亮点
+## TUI 仪表盘
 
-### 1. Q-Score 二次衰减：内层小单才是核心资产
+使用 `--features tui` 编译后启动，终端内实时展示运营数据：
 
 ```
+┌─ [1]Overview  [2]Orders  [3]Risk  [4]Charts ─────────┐
+│                                                       │
+│  Tab 1: 市场概览、PnL、WebSocket 状态                   │
+│  Tab 2: 活跃订单表（可滚动/筛选）                        │
+│  Tab 3: 风险等级、IIR Gauge、Ghost Fill 统计             │
+│  Tab 4: 60 分钟价格折线图                               │
+│                                                       │
+└───────────────────────────────────────────────────────┘
+```
+
+**键盘操作**：
+
+| 按键 | 作用 |
+|------|------|
+| `1-4` / `Tab` | 切换面板 |
+| `j/k` / `↑↓` | 滚动订单列表 |
+| `f` | 切换订单筛选（全部/活跃） |
+| `r` | 手动 L3 恢复 |
+| `←→` | 切换图表市场 |
+| `q` / `Ctrl+C` | 退出 |
+
+> TUI 模式下，tracing 日志自动重定向到 `bot.log`，不干扰终端显示。
+
+---
+
+## 项目结构
+
+```
+polymarket-lp-mm/
+├── src/
+│   ├── main.rs              # 入口：密钥读取、组件初始化、TUI 启动
+│   ├── lib.rs               # 模块声明
+│   ├── config/mod.rs        # TOML 配置解析与校验
+│   ├── data/
+│   │   ├── mod.rs           # SharedState 共享状态（DashMap + RwLock）
+│   │   ├── rest.rs          # CLOB REST API 客户端
+│   │   ├── ws.rs            # WebSocket 实时行情/用户事件
+│   │   ├── gamma.rs         # Gamma API（结算时间、市场元数据）
+│   │   ├── state.rs         # 状态管理辅助
+│   │   └── ctf.rs           # CTF 链上 Merge 操作
+│   ├── pricing/mod.rs       # 定价引擎：VAF/IIF/TF 三因子 + 阶梯挂单
+│   ├── position/mod.rs      # 持仓管理：IIR 计算、Skewing、Merge 决策
+│   ├── risk/mod.rs          # 三级风控状态机（L1→L2→L3）
+│   ├── execution/mod.rs     # 订单执行：批量下单、EIP-712 签名
+│   ├── monitor/
+│   │   ├── mod.rs           # 主循环 Orchestrator（tokio::select!）
+│   │   └── strategy.rs      # 策略逻辑：报价生成、风控联动
+│   └── tui/                 # TUI 仪表盘（feature-gated）
+│       ├── mod.rs           # TUI 入口 + 终端管理
+│       ├── app.rs           # 应用状态 + 键盘处理
+│       ├── event.rs         # 事件循环（crossterm + tick + snapshot）
+│       ├── snapshot.rs      # DashboardSnapshot 只读快照
+│       ├── ui.rs            # 顶层渲染调度
+│       └── tabs/            # 4 个 Tab 渲染模块
+├── tests/                   # 75 个单元/集成测试
+├── configs/                 # 预设策略模板
+├── docs/                    # 设计文档
+├── .env.example             # API 密钥模板
+└── config.example.toml      # 配置文件模板
+```
+
+---
+
+## 核心设计
+
+### Q-Score 二次衰减
+
+```
+Q = ((max_spread - distance) / max_spread)² × size
+
 距中间价     得分效率
 0.0 cents   100%
+0.5 cents    69%
 1.0 cents    44%   ← 移动 1 cent，损失 56%
 2.0 cents    11%   ← 再移动 1 cent，损失 75%
 3.0 cents     0%   （超出激励范围）
@@ -34,7 +213,7 @@ Polymarket 预测市场的自动化做市（Market Making）系统，基于 Q-Sc
 
 奖励随距离平方级下降，主力资金必须集中在最靠近中间价的位置。
 
-### 2. 双边挂单 = 3 倍奖励
+### 双边挂单 = 3 倍奖励
 
 平台对单边挂单执行 ÷3 惩罚：
 
@@ -45,72 +224,42 @@ $100 买单 + $100 卖单（双边）→ Q-Score × 1  ≈ 80.2 分
 
 相同资金，双边策略奖励是单边的 **3 倍**。
 
-### 3. 阶梯挂单：奖励与保护兼顾
+### 阶梯挂单
 
 ```
-内层（0.5 cent）$100 × 2  →  贡献 75% 的 Q-Score
-中层（1.5 cents）$200 × 2  →  贡献 20%
-外层（2.5 cents）$200 × 2  →  贡献  5%（主要目的是缓冲极端行情）
+内层（0.5c）→  贡献 ~75% Q-Score（高效但高风险）
+中层（1.5c）→  贡献 ~20%
+外层（2.5c）→  贡献 ~5%（缓冲极端行情，争取撤单时间）
 ```
 
-外层大单不是为了奖励，而是给风控系统争取**撤单反应时间**。
+### Quote Skewing
 
-### 4. Quote Skewing：让市场帮你调仓
-
-持仓失衡时，不直接市价卖出，而是通过调整报价引导市场自然平衡：
+持仓失衡时，通过调整报价引导市场自然平衡，零滑点调仓：
 
 ```
 IIR = +0.6（持有过多 YES）
 正常报价：bid@0.59，ask@0.61
 偏斜后：  bid@0.578，ask@0.598
-→ 卖出 YES 的概率增大，买入概率减小，零滑点调仓
+→ 卖出 YES 概率增大，被动调仓
 ```
 
-### 5. Merge 优先于市价卖出
+### CTF Merge
 
-当同时持有 YES 和 NO 时，1 YES + 1 NO = 1 USDC（链上确定性，无滑点）：
-
-```
-持有 YES=300，NO=200
-→ Merge 200 对 → 收回 $200 USDC，剩余 YES=100
-→ 比市价卖出 200 YES 零损耗
-```
-
-### 6. 三级风控状态机
+同时持有 YES 和 NO 时，链上 Merge 比市价卖出零损耗：
 
 ```
-L1（正常）→ 全自动，持续做市
-    ↓ IIR > 0.5 / 5分钟价格跳动 > 10% / 日亏 > 3%
-L2（预警）→ 规模收缩 50%，通知人工，可自动恢复
-    ↓ IIR > 0.75 / 价格跳动 > 20% / 日亏 > 8%
-L3（紧急）→ cancel-all，停止做市，必须人工恢复
+YES=300, NO=200 → Merge 200 对 → 收回 $200 USDC，剩余 YES=100
 ```
 
-L3 → 恢复**必须人工确认**，防止系统在不安全状态下自动重启。
-
-### 7. Ghost Fills 攻击防护
-
-监控订单取消事件，区分"我主动取消"和"被外部取消"：
-
-```python
-if event.type == "CANCELED" and order_id not in my_cancel_requests:
-    # 我没有发取消指令，但订单被取消 → Ghost Fill 攻击
-    trigger_l3_emergency()
-```
-
----
-
-## 盈利逻辑
+### 三级风控状态机
 
 ```
-盈利来源              典型占比    风险等级
-────────────────────────────────────────
-LP 奖励（Q-Score）    60–70%      低
-做市价差（Spread）    20–30%      中
-方向性持仓             5–15%      高
+L1（正常）→ 全自动做市
+    ↓ IIR/价格跳动/日亏超阈值
+L2（预警）→ 规模收缩 + 价差扩大，可自动恢复
+    ↓ 持续恶化或超时
+L3（紧急）→ 全部撤单，必须人工确认恢复（TUI 按 r 键）
 ```
-
-**LP 奖励是支柱**：只要合规挂单，每分钟采样一次，每日结算——是相对稳定的收入来源。
 
 ---
 
@@ -120,8 +269,29 @@ LP 奖励（Q-Score）    60–70%      低
 |------|------|
 | 批量下单上限 | 15 个/批 |
 | API 限流 | 3000 次/10 分钟 |
-| Q-Score 采样频率 | 每分钟 1 次（1440 次/天） |
+| Q-Score 采样频率 | 每分钟 1 次 |
 | WebSocket 保活 | 每 8 秒 PING |
-| Merge 最小规模 | 建议 $100（Gas 成本考量） |
+| Merge 最小规模 | 建议 $100（Gas 成本） |
 | 市场价格范围 | [0.01, 0.99] |
 | 奖励结算 | 每日 UTC 00:00 |
+
+---
+
+## 文档目录
+
+| 文档 | 内容 |
+|------|------|
+| [00-system-overview](./docs/00-system-overview.md) | 系统架构、数据流、启动顺序 |
+| [01-data-layer](./docs/01-data-layer.md) | WebSocket、REST、断线重连、状态缓存 |
+| [02-qscore-rewards](./docs/02-qscore-rewards.md) | Q-Score 公式、二次衰减、激励密度 |
+| [03-pricing-engine](./docs/03-pricing-engine.md) | 价差计算、VAF/IIF/TF 动态调整 |
+| [04-position-management](./docs/04-position-management.md) | IIR、Skewing、Merge 决策树 |
+| [05-risk-control](./docs/05-risk-control.md) | L1/L2/L3 状态机、Ghost Fills 检测 |
+| [06-execution-layer](./docs/06-execution-layer.md) | 订单生命周期、EIP-712、批量操作 |
+| [07-ops-monitoring](./docs/07-ops-monitoring.md) | 运维监控、告警、日志分析 |
+
+---
+
+## License
+
+MIT
