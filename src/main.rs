@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
-use polymarket_mm::{config, data, execution, monitor, position, pricing, risk};
+use polymarket_mm::{config, data, execution, monitor, position, pricing, risk, strategy};
 
 /// R6-1: Read and clear secrets while single-threaded, before tokio runtime starts.
 /// This avoids the unsound `unsafe { remove_var() }` inside a multi-threaded runtime.
@@ -120,11 +120,19 @@ async fn async_main(
     let pricing_engine = pricing::PricingEngine::new(&app_config.pricing, &app_config.risk);
     info!("Pricing engine initialized");
 
-    // Step 7: Initialize position manager
+    // Step 7: Initialize strategy registry (runtime-mutable strategy management)
+    let mut strategy_registry = strategy::StrategyRegistry::from_config(&app_config);
+    strategy_registry.load_profiles_from_dir("configs");
+    let strategy_registry = strategy_registry.into_shared();
+    info!(
+        "Strategy registry initialized with profiles loaded from configs/"
+    );
+
+    // Step 8: Initialize position manager
     let position_manager = position::PositionManager::new(&app_config.position);
     info!("Position manager initialized");
 
-    // Step 8: Initialize CTF merger for on-chain merge operations (optional)
+    // Step 9: Initialize CTF merger for on-chain merge operations (optional)
     let ctf_merger = match data::ctf::CtfMerger::new(
         &app_config.api.polygon_rpc_url,
         executor.client().clone_signer(),
@@ -139,7 +147,7 @@ async fn async_main(
         }
     };
 
-    // Step 9: Set up TUI channels (if feature enabled)
+    // Step 10: Set up TUI channels (if feature enabled)
     #[cfg(feature = "tui")]
     let tui_channels = {
         let (snapshot_tx, snapshot_rx) = tokio::sync::mpsc::channel(4);
@@ -156,7 +164,7 @@ async fn async_main(
         Some((snapshot_tx, cmd_rx))
     };
 
-    // Step 10: Run main orchestration loop
+    // Step 11: Run main orchestration loop
     info!("Starting main loop...");
     let result = monitor::run_orchestrator(
         app_config,
@@ -166,6 +174,7 @@ async fn async_main(
         pricing_engine,
         position_manager,
         ctf_merger,
+        strategy_registry,
         #[cfg(feature = "tui")]
         tui_channels,
     )

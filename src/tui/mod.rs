@@ -1,5 +1,7 @@
 pub mod app;
 pub mod event;
+pub mod input;
+pub mod modal;
 pub mod snapshot;
 mod tabs;
 mod ui;
@@ -77,6 +79,11 @@ pub async fn run_tui(
                 // Just triggers a redraw (handled by the draw call above)
             }
             AppEvent::Snapshot(snap) => {
+                // If the snapshot carries search results, push them to the
+                // active SearchMarket modal so the user sees them immediately.
+                if let Some(ref results) = snap.search_results {
+                    app.update_search_results(results.clone());
+                }
                 app.snapshot = Some(snap);
             }
         }

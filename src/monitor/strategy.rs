@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, MarketConfig, PricingConfig};
 use crate::data::SharedState;
 use crate::data::gamma;
 use crate::data::state::OrderSide;
@@ -69,7 +69,8 @@ pub async fn evaluate_risk(
 /// require exchange-level replace-order support (not available on Polymarket).
 pub async fn run_market_strategy(
     market_id: &str,
-    config: &AppConfig,
+    market_config: &MarketConfig,
+    pricing_config: &PricingConfig,
     state: &SharedState,
     pricing_engine: &PricingEngine,
     executor: &mut OrderExecutor,
@@ -79,9 +80,6 @@ pub async fn run_market_strategy(
     last_midpoints: &mut HashMap<String, Decimal>,
     last_times: &mut HashMap<String, DateTime<Utc>>,
 ) -> Result<()> {
-    let Some(market_config) = config.markets.iter().find(|m| m.market_id == market_id) else {
-        return Ok(());
-    };
 
     let Some(ms) = state.market_states.get(market_id) else {
         return Ok(());
@@ -104,12 +102,12 @@ pub async fn run_market_strategy(
         let last_time = last_times.get(market_id).copied();
 
         let price_moved = last_mid
-            .map(|lm| (current_midpoint - lm).abs() >= config.pricing.requote_threshold)
+            .map(|lm| (current_midpoint - lm).abs() >= pricing_config.requote_threshold)
             .unwrap_or(true);
 
         let time_expired = last_time
             .map(|lt| {
-                (now - lt).num_seconds() >= config.pricing.requote_interval_secs as i64
+                (now - lt).num_seconds() >= pricing_config.requote_interval_secs as i64
             })
             .unwrap_or(true);
 
@@ -171,6 +169,7 @@ pub async fn run_market_strategy(
         per_market_capital,
         risk_level,
         available_yes_shares,
+        pricing_config,
     );
 
     if orders.is_empty() {

@@ -65,7 +65,8 @@ fn test_market_config() -> MarketConfig {
 
 #[test]
 fn test_generate_quotes_l1_normal() {
-    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+    let pricing = test_pricing_config();
+    let engine = PricingEngine::new(&pricing, &test_risk_config());
     let market = test_market_config();
 
     let orders = engine.generate_quotes(
@@ -77,6 +78,7 @@ fn test_generate_quotes_l1_normal() {
         dec!(500.0),    // per-market capital
         RiskLevel::L1Normal,
         dec!(10000.0),  // available YES shares (large, not limiting)
+        &pricing,
     );
 
     // 3 layers × 2 sides = 6 orders
@@ -116,7 +118,8 @@ fn test_generate_quotes_l1_normal() {
 
 #[test]
 fn test_no_orders_in_l3() {
-    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+    let pricing = test_pricing_config();
+    let engine = PricingEngine::new(&pricing, &test_risk_config());
     let market = test_market_config();
 
     let orders = engine.generate_quotes(
@@ -128,6 +131,7 @@ fn test_no_orders_in_l3() {
         dec!(500.0),
         RiskLevel::L3Emergency,
         dec!(10000.0),
+        &pricing,
     );
 
     assert!(orders.is_empty(), "L3 should produce zero orders");
@@ -135,17 +139,18 @@ fn test_no_orders_in_l3() {
 
 #[test]
 fn test_l2_reduces_size_and_widens_spread() {
-    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+    let pricing = test_pricing_config();
+    let engine = PricingEngine::new(&pricing, &test_risk_config());
     let market = test_market_config();
 
     let l1_orders = engine.generate_quotes(
         &market, dec!(0.50), dec!(0.0), dec!(1.0), dec!(1.0),
-        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0),
+        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0), &pricing,
     );
 
     let l2_orders = engine.generate_quotes(
         &market, dec!(0.50), dec!(0.0), dec!(1.0), dec!(1.0),
-        dec!(500.0), RiskLevel::L2Warning, dec!(10000.0),
+        dec!(500.0), RiskLevel::L2Warning, dec!(10000.0), &pricing,
     );
 
     // L2 should have same number of orders but smaller sizes
@@ -178,19 +183,20 @@ fn test_l2_reduces_size_and_widens_spread() {
 
 #[test]
 fn test_skewing_with_positive_iir() {
-    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+    let pricing = test_pricing_config();
+    let engine = PricingEngine::new(&pricing, &test_risk_config());
     let market = test_market_config();
 
     // Balanced
     let balanced = engine.generate_quotes(
         &market, dec!(0.50), dec!(0.0), dec!(1.0), dec!(1.0),
-        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0),
+        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0), &pricing,
     );
 
     // Positive IIR (holding too much YES) → prices shift down
     let skewed = engine.generate_quotes(
         &market, dec!(0.50), dec!(0.6), dec!(1.0), dec!(1.0),
-        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0),
+        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0), &pricing,
     );
 
     let balanced_inner_ask = balanced.iter()
@@ -212,12 +218,13 @@ fn test_skewing_with_positive_iir() {
 
 #[test]
 fn test_qscore_estimation() {
-    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+    let pricing = test_pricing_config();
+    let engine = PricingEngine::new(&pricing, &test_risk_config());
     let market = test_market_config();
 
     let orders = engine.generate_quotes(
         &market, dec!(0.50), dec!(0.0), dec!(1.0), dec!(1.0),
-        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0),
+        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0), &pricing,
     );
 
     let q = engine.estimate_qscore(&orders, dec!(0.50), dec!(0.03));
@@ -256,14 +263,15 @@ fn test_time_factor() {
 
 #[test]
 fn test_prices_within_bounds() {
-    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+    let pricing = test_pricing_config();
+    let engine = PricingEngine::new(&pricing, &test_risk_config());
     let market = test_market_config();
 
     // Test with extreme midpoints
     for midpoint in [dec!(0.02), dec!(0.05), dec!(0.50), dec!(0.95), dec!(0.98)] {
         let orders = engine.generate_quotes(
             &market, midpoint, dec!(0.0), dec!(1.0), dec!(1.0),
-            dec!(500.0), RiskLevel::L1Normal, dec!(10000.0),
+            dec!(500.0), RiskLevel::L1Normal, dec!(10000.0), &pricing,
         );
 
         for order in &orders {
@@ -280,13 +288,14 @@ fn test_prices_within_bounds() {
 
 #[test]
 fn test_ask_capped_by_available_shares() {
-    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+    let pricing = test_pricing_config();
+    let engine = PricingEngine::new(&pricing, &test_risk_config());
     let market = test_market_config();
 
     // Very limited available YES shares (only 10 shares)
     let orders = engine.generate_quotes(
         &market, dec!(0.50), dec!(0.0), dec!(1.0), dec!(1.0),
-        dec!(500.0), RiskLevel::L1Normal, dec!(10.0),
+        dec!(500.0), RiskLevel::L1Normal, dec!(10.0), &pricing,
     );
 
     let total_ask_size: Decimal = orders.iter()
@@ -354,14 +363,15 @@ fn test_tf_boundary_values() {
 
 #[test]
 fn test_no_orders_below_min_size() {
-    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+    let pricing = test_pricing_config();
+    let engine = PricingEngine::new(&pricing, &test_risk_config());
     let market = test_market_config(); // min_size = 5.0
 
     // Very small capital → sizes will be below min_size threshold
     let orders = engine.generate_quotes(
         &market, dec!(0.50), dec!(0.0), dec!(1.0), dec!(1.0),
         dec!(1.0), // Only $1 per market
-        RiskLevel::L1Normal, dec!(10000.0),
+        RiskLevel::L1Normal, dec!(10000.0), &pricing,
     );
 
     for order in &orders {
@@ -375,14 +385,15 @@ fn test_no_orders_below_min_size() {
 
 #[test]
 fn test_extreme_midpoint_prices_within_bounds() {
-    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+    let pricing = test_pricing_config();
+    let engine = PricingEngine::new(&pricing, &test_risk_config());
     let market = test_market_config();
 
     // Extreme low midpoint (0.02): verify all orders stay within [0.01, 0.99]
     // and bid-ask ordering is preserved despite clamping.
     let orders = engine.generate_quotes(
         &market, dec!(0.02), dec!(0.0), dec!(1.0), dec!(1.0),
-        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0),
+        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0), &pricing,
     );
 
     assert!(!orders.is_empty(), "Extreme midpoint should still produce orders");
@@ -415,13 +426,14 @@ fn test_extreme_midpoint_prices_within_bounds() {
 
 #[test]
 fn test_crossed_quotes_with_extreme_skew() {
-    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+    let pricing = test_pricing_config();
+    let engine = PricingEngine::new(&pricing, &test_risk_config());
     let market = test_market_config();
 
     // Extreme IIR creates large skew that could push bid above ask
     let orders = engine.generate_quotes(
         &market, dec!(0.50), dec!(0.95), dec!(1.0), dec!(1.0),
-        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0),
+        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0), &pricing,
     );
 
     assert!(!orders.is_empty(), "Extreme skew with midpoint=0.50 should still produce orders");
@@ -446,7 +458,8 @@ fn test_crossed_quotes_with_extreme_skew() {
 
 #[test]
 fn test_tf_zero_produces_empty_due_to_crossed_quotes() {
-    let engine = PricingEngine::new(&test_pricing_config(), &test_risk_config());
+    let pricing = test_pricing_config();
+    let engine = PricingEngine::new(&pricing, &test_risk_config());
     let market = test_market_config();
 
     // TF=0 zeroes the distance multiplier → min clamp 0.005 → round_dp(2) causes
@@ -455,7 +468,7 @@ fn test_tf_zero_produces_empty_due_to_crossed_quotes() {
     // This test verifies the engine doesn't panic and crossed quote protection works.
     let orders = engine.generate_quotes(
         &market, dec!(0.50), dec!(0.0), dec!(1.0), dec!(0.0),
-        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0),
+        dec!(500.0), RiskLevel::L1Normal, dec!(10000.0), &pricing,
     );
 
     // All layers get crossed due to minimal distance + banker's rounding

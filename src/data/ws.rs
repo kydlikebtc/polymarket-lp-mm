@@ -22,6 +22,9 @@ use crate::risk::RiskController;
 /// Run market data WebSocket using the SDK.
 /// Subscribes to orderbook updates for all configured token IDs.
 /// Updates SharedState with latest prices and spread.
+///
+/// On each reconnection, reads the latest token list from `state.ws_tokens`
+/// so that dynamically added/removed markets are picked up without restart.
 pub async fn run_market_ws(
     state: SharedState,
     token_ids: Vec<String>,
@@ -31,16 +34,41 @@ pub async fn run_market_ws(
         token_ids.len()
     );
 
-    let asset_ids: Vec<U256> = token_ids
-        .iter()
-        .map(|id| U256::from_str(id))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| anyhow::anyhow!("Invalid token_id: {e}"))?;
-
     let mut backoff_secs = 1u64;
     const MAX_BACKOFF_SECS: u64 = 30;
 
     loop {
+        // Read the latest token list on each (re)connection so dynamically
+        // added markets are picked up.
+        let current_tokens = {
+            let tokens = state.ws_tokens.read().await;
+            tokens.clone()
+        };
+        // Clear the reconnect signal (we're about to connect with latest tokens)
+        state.ws_reconnect_needed.store(false, Ordering::Release);
+
+        let asset_ids: Vec<U256> = current_tokens
+            .iter()
+            .filter_map(|id| match U256::from_str(id) {
+                Ok(u) => Some(u),
+                Err(e) => {
+                    warn!("Invalid token_id '{id}': {e}, skipping");
+                    None
+                }
+            })
+            .collect();
+
+        if asset_ids.is_empty() {
+            warn!("No valid token_ids for market WS, waiting...");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+
+        info!(
+            "Market WebSocket connecting with {} tokens",
+            asset_ids.len()
+        );
+
         let was_connected = match run_market_ws_inner(&state, &asset_ids).await {
             Ok(connected) => {
                 info!("Market WebSocket closed normally, reconnecting in {backoff_secs}s...");
@@ -93,6 +121,12 @@ async fn run_market_ws_inner(
     let mut received_any = false;
 
     while let Some(result) = stream.next().await {
+        // Check if a reconnect has been requested (e.g., new market added)
+        if state.ws_reconnect_needed.load(Ordering::Acquire) {
+            info!("WS reconnect requested (token list changed), disconnecting to reconnect...");
+            return Ok(received_any);
+        }
+
         match result {
             Ok(book) => {
                 received_any = true;

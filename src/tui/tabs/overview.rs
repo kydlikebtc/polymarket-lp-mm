@@ -32,7 +32,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
 
     render_header(app, snap, frame, chunks[0]);
     render_info_panels(snap, frame, chunks[1]);
-    render_market_table(snap, frame, chunks[2]);
+    render_market_table(app, snap, frame, chunks[2]);
     render_factor_panels(snap, frame, chunks[3]);
     render_footer(snap, frame, chunks[4]);
 }
@@ -185,8 +185,9 @@ fn render_strategy_panel(snap: &DashboardSnapshot, frame: &mut Frame, area: Rect
     );
 }
 
-fn render_market_table(snap: &DashboardSnapshot, frame: &mut Frame, area: Rect) {
+fn render_market_table(app: &App, snap: &DashboardSnapshot, frame: &mut Frame, area: Rect) {
     let header = Row::new(vec![
+        Cell::from(""),
         Cell::from("Market"),
         Cell::from("Mid"),
         Cell::from("Sprd"),
@@ -209,8 +210,27 @@ fn render_market_table(snap: &DashboardSnapshot, frame: &mut Frame, area: Rect) 
     let rows: Vec<Row> = snap
         .markets
         .iter()
-        .map(|m| {
-            let iir_style = if m.iir.abs() >= rust_decimal_macros::dec!(0.5) {
+        .enumerate()
+        .map(|(idx, m)| {
+            let is_selected = idx == app.selected_overview_market;
+
+            // Enabled/disabled indicator
+            let status_cell = if m.enabled {
+                Cell::from(Span::styled("ON", Style::default().fg(Color::Green)))
+            } else {
+                Cell::from(Span::styled("--", Style::default().fg(Color::DarkGray)))
+            };
+
+            // Dim disabled markets
+            let row_style = if !m.enabled {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+
+            let iir_style = if !m.enabled {
+                Style::default().fg(Color::DarkGray)
+            } else if m.iir.abs() >= rust_decimal_macros::dec!(0.5) {
                 Style::default().fg(Color::Red)
             } else if m.iir.abs() >= rust_decimal_macros::dec!(0.3) {
                 Style::default().fg(Color::Yellow)
@@ -218,7 +238,9 @@ fn render_market_table(snap: &DashboardSnapshot, frame: &mut Frame, area: Rect) 
                 Style::default().fg(Color::Green)
             };
 
-            let lp_style = if m.reward_qualified {
+            let lp_style = if !m.enabled {
+                Style::default().fg(Color::DarkGray)
+            } else if m.reward_qualified {
                 Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
             } else if m.active_orders > 0 {
                 Style::default().fg(Color::Yellow)
@@ -226,7 +248,9 @@ fn render_market_table(snap: &DashboardSnapshot, frame: &mut Frame, area: Rect) 
                 Style::default().fg(Color::DarkGray)
             };
 
-            let lp_label = if m.reward_qualified {
+            let lp_label = if !m.enabled {
+                "OFF"
+            } else if m.reward_qualified {
                 "DUAL"
             } else if m.active_orders > 0 {
                 "1-SD"
@@ -234,8 +258,16 @@ fn render_market_table(snap: &DashboardSnapshot, frame: &mut Frame, area: Rect) 
                 "OFF"
             };
 
-            Row::new(vec![
-                Cell::from(truncate_str(&m.name, 18)),
+            // Selection indicator
+            let name_display = if is_selected {
+                format!(">{}", truncate_str(&m.name, 17))
+            } else {
+                format!(" {}", truncate_str(&m.name, 17))
+            };
+
+            let row = Row::new(vec![
+                status_cell,
+                Cell::from(name_display),
                 Cell::from(format!("{:.4}", m.midpoint)),
                 Cell::from(format!("{:.4}", m.spread)),
                 Cell::from(
@@ -256,12 +288,20 @@ fn render_market_table(snap: &DashboardSnapshot, frame: &mut Frame, area: Rect) 
                 Cell::from(format!("{:.1}", m.estimated_q)),
                 Cell::from(lp_label).style(lp_style),
             ])
+            .style(row_style);
+
+            if is_selected {
+                row.style(row_style.add_modifier(Modifier::REVERSED))
+            } else {
+                row
+            }
         })
         .collect();
 
     let table = Table::new(
         rows,
         [
+            Constraint::Length(3),  // ON/--
             Constraint::Min(14),
             Constraint::Length(7),
             Constraint::Length(7),
@@ -408,7 +448,7 @@ fn render_footer(snap: &DashboardSnapshot, frame: &mut Frame, area: Rect) {
             Style::default().fg(pnl_color).add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(" | Fills: {} ", snap.fill_count)),
-        Span::raw("| [1-4] Tab  [q] Quit"),
+        Span::raw("| [1-4] Tab  [j/k] Select  [e] Toggle  [q] Quit"),
     ]);
 
     frame.render_widget(

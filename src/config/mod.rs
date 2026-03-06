@@ -150,8 +150,8 @@ impl AppConfig {
     fn validate(&self) -> Result<()> {
         anyhow::ensure!(!self.markets.is_empty(), "At least one market must be configured");
         anyhow::ensure!(
-            self.markets.len() <= 3,
-            "MVP supports at most 3 markets, got {}",
+            self.markets.len() <= 10,
+            "Maximum 10 markets supported, got {}",
             self.markets.len()
         );
         anyhow::ensure!(

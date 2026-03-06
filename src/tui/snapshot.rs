@@ -10,6 +10,8 @@ use crate::data::state::{OrderSide, OrderStatus};
 use crate::data::SharedState;
 use crate::pricing::PricingEngine;
 use crate::risk::{RiskController, RiskLevel};
+use crate::strategy::SharedRegistry;
+use crate::tui::app::SearchResultItem;
 
 /// Immutable snapshot of the entire dashboard state.
 /// Sent from the orchestrator to the TUI task via mpsc channel.
@@ -35,6 +37,10 @@ pub struct DashboardSnapshot {
     // ── Execution stats ──
     pub orders_placed_total: u64,
     pub orders_cancelled_total: u64,
+    /// Search results from Gamma API (populated asynchronously)
+    pub search_results: Option<Vec<SearchResultItem>>,
+    /// Available strategy profile names (from StrategyRegistry)
+    pub profile_names: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +70,10 @@ pub struct MarketSnapshot {
     pub tf: Decimal,
     pub skew: Decimal,
     pub hours_to_settlement: Option<f64>,
+    // ── Strategy management ──
+    pub enabled: bool,
+    pub profile_name: String,
+    pub capital_allocation: Decimal,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +110,7 @@ pub async fn collect_snapshot(
     state: &SharedState,
     risk_controller: &Arc<Mutex<RiskController>>,
     pricing_engine: &PricingEngine,
+    strategy_registry: &SharedRegistry,
 ) -> DashboardSnapshot {
     let now = Utc::now();
 
@@ -125,6 +136,36 @@ pub async fn collect_snapshot(
     let market_ws_connected = state.market_ws_connected.load(std::sync::atomic::Ordering::Acquire);
     let user_ws_connected = state.user_ws_connected.load(std::sync::atomic::Ordering::Acquire);
     let ws_disconnect_secs = state.max_ws_disconnect_secs().await;
+
+    // Strategy registry info (single lock acquisition, then release)
+    let (strategy_info, profile_names, dynamic_instances): (
+        std::collections::HashMap<String, (bool, String, Decimal)>,
+        Vec<String>,
+        Vec<crate::strategy::StrategyInstance>,
+    ) = {
+        let registry = strategy_registry.read().await;
+        let info = registry
+            .all_instances()
+            .iter()
+            .map(|i| {
+                (
+                    i.market.market_id.clone(),
+                    (i.enabled, i.profile_name.clone(), i.capital_allocation),
+                )
+            })
+            .collect();
+        let names = registry.profile_names();
+        // Collect instances for markets NOT in config (dynamically added)
+        let config_market_ids: std::collections::HashSet<&str> =
+            config.markets.iter().map(|m| m.market_id.as_str()).collect();
+        let dynamic: Vec<_> = registry
+            .all_instances()
+            .iter()
+            .filter(|i| !config_market_ids.contains(i.market.market_id.as_str()))
+            .cloned()
+            .collect();
+        (info, names, dynamic)
+    };
 
     // Market snapshots
     let mut markets = Vec::with_capacity(config.markets.len());
@@ -186,6 +227,12 @@ pub async fn collect_snapshot(
             .sum();
         deployed_capital += market_deployed;
 
+        // Strategy enabled/profile/capital from registry
+        let (enabled, profile_name, capital_allocation) = strategy_info
+            .get(mid)
+            .cloned()
+            .unwrap_or((true, "default".to_string(), Decimal::ZERO));
+
         markets.push(MarketSnapshot {
             market_id: mid.clone(),
             name: market_cfg.name.clone(),
@@ -207,11 +254,98 @@ pub async fn collect_snapshot(
             tf,
             skew,
             hours_to_settlement,
+            enabled,
+            profile_name,
+            capital_allocation,
         });
     }
 
-    // Build market lookup for per-order reward calculation
-    let market_lookup: std::collections::HashMap<&str, (Decimal, Decimal, Decimal, &str)> = config
+    // FIX-5: Include dynamically added markets (not in config.markets)
+    for dyn_instance in &dynamic_instances {
+        let mid = &dyn_instance.market.market_id;
+
+        let (midpoint, spread, best_bid, best_ask) = state
+            .market_states
+            .get(mid)
+            .map(|ms| (ms.midpoint, ms.spread, ms.best_bid, ms.best_ask))
+            .unwrap_or((Decimal::ZERO, Decimal::ZERO, None, None));
+
+        let (iir, yes_shares, no_shares, yes_value, no_value) = state
+            .positions
+            .get(mid)
+            .map(|p| (p.iir(), p.yes_shares, p.no_shares, p.yes_value, p.no_value))
+            .unwrap_or((Decimal::ZERO, Decimal::ZERO, Decimal::ZERO, Decimal::ZERO, Decimal::ZERO));
+
+        let active_orders = state
+            .my_orders
+            .iter()
+            .filter(|o| o.market_id == *mid && matches!(o.status, OrderStatus::Live))
+            .count();
+
+        let max_incentive_spread = dyn_instance.market.max_incentive_spread;
+        let min_size = dyn_instance.market.min_size;
+        let live_orders_for_market: Vec<_> = state
+            .my_orders
+            .iter()
+            .filter(|o| o.market_id == *mid && matches!(o.status, OrderStatus::Live))
+            .map(|o| (o.side, o.price, o.size))
+            .collect();
+
+        let (estimated_q, reward_qualified) = compute_market_reward(
+            &live_orders_for_market, midpoint, max_incentive_spread, min_size,
+        );
+
+        let vaf = pricing_engine.compute_vaf(state, mid);
+        let hours_to_settlement = state
+            .settlement_times
+            .get(mid)
+            .map(|end_date| gamma::hours_until(&end_date).unwrap_or(0.0));
+        let tf = pricing_engine.compute_tf(hours_to_settlement);
+        let skew = -iir * config.pricing.skew_factor;
+        let skew = skew.max(dec!(-0.03)).min(dec!(0.03));
+
+        let market_deployed: Decimal = state
+            .my_orders
+            .iter()
+            .filter(|o| o.market_id == *mid && matches!(o.status, OrderStatus::Live))
+            .map(|o| o.price * o.size)
+            .sum();
+        deployed_capital += market_deployed;
+
+        let (enabled, profile_name, capital_allocation) = strategy_info
+            .get(mid)
+            .cloned()
+            .unwrap_or((dyn_instance.enabled, dyn_instance.profile_name.clone(), dyn_instance.capital_allocation));
+
+        markets.push(MarketSnapshot {
+            market_id: mid.clone(),
+            name: dyn_instance.market.name.clone(),
+            midpoint,
+            spread,
+            best_bid,
+            best_ask,
+            iir,
+            yes_shares,
+            no_shares,
+            yes_value,
+            no_value,
+            active_orders,
+            max_incentive_spread,
+            min_size,
+            estimated_q,
+            reward_qualified,
+            vaf,
+            tf,
+            skew,
+            hours_to_settlement,
+            enabled,
+            profile_name,
+            capital_allocation,
+        });
+    }
+
+    // Build market lookup for per-order reward calculation (includes dynamic markets)
+    let mut market_lookup: std::collections::HashMap<&str, (Decimal, Decimal, Decimal, &str)> = config
         .markets
         .iter()
         .map(|m| {
@@ -223,6 +357,16 @@ pub async fn collect_snapshot(
             (m.market_id.as_str(), (mid, m.max_incentive_spread, m.min_size, m.name.as_str()))
         })
         .collect();
+    for dyn_inst in &dynamic_instances {
+        let mid = state
+            .market_states
+            .get(&dyn_inst.market.market_id)
+            .map(|ms| ms.midpoint)
+            .unwrap_or(Decimal::ZERO);
+        market_lookup.entry(dyn_inst.market.market_id.as_str()).or_insert(
+            (mid, dyn_inst.market.max_incentive_spread, dyn_inst.market.min_size, dyn_inst.market.name.as_str())
+        );
+    }
 
     // Order snapshots with LP reward fields
     let mut orders: Vec<OrderSnapshot> = state
@@ -279,11 +423,35 @@ pub async fn collect_snapshot(
             .then(a.age_secs.cmp(&b.age_secs))
     });
 
-    // Price history snapshots (last 60 minutes)
+    // Price history snapshots (last 60 minutes) — includes dynamic markets
     let base_ts = now.timestamp() as f64;
     let mut price_histories = Vec::new();
+    let mut seen_markets = std::collections::HashSet::new();
     for market_cfg in &config.markets {
         let mid = &market_cfg.market_id;
+        seen_markets.insert(mid.clone());
+        if let Some(history) = state.price_history.get(mid) {
+            let points: Vec<(f64, f64)> = history
+                .iter()
+                .map(|p| {
+                    let x = (p.timestamp.timestamp() as f64) - base_ts + 3600.0;
+                    let y = p.price.to_string().parse::<f64>().unwrap_or(0.0);
+                    (x, y)
+                })
+                .collect();
+            if !points.is_empty() {
+                price_histories.push(PriceHistorySnapshot {
+                    market_id: mid.clone(),
+                    points,
+                });
+            }
+        }
+    }
+    for dyn_inst in &dynamic_instances {
+        let mid = &dyn_inst.market.market_id;
+        if seen_markets.contains(mid) {
+            continue;
+        }
         if let Some(history) = state.price_history.get(mid) {
             let points: Vec<(f64, f64)> = history
                 .iter()
@@ -320,6 +488,8 @@ pub async fn collect_snapshot(
         deployed_capital,
         orders_placed_total,
         orders_cancelled_total,
+        search_results: None,
+        profile_names,
     }
 }
 

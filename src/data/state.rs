@@ -38,6 +38,11 @@ pub struct SharedState {
     pub orders_placed_count: Arc<AtomicU64>,
     /// Cumulative orders cancelled count (for execution stats display)
     pub orders_cancelled_count: Arc<AtomicU64>,
+    /// Dynamic token list for WS subscription (updated when markets are added/removed).
+    /// WS task reads this on each reconnection to subscribe to the latest set of tokens.
+    pub ws_tokens: Arc<RwLock<Vec<String>>>,
+    /// Signal to trigger WS reconnection (set to true when ws_tokens changes)
+    pub ws_reconnect_needed: Arc<AtomicBool>,
 }
 
 /// Per-market cost basis for weighted-average PnL tracking.
@@ -257,6 +262,8 @@ impl SharedState {
             token_to_market.insert(market.token_id.clone(), market.market_id.clone());
         }
 
+        let ws_tokens: Vec<String> = config.markets.iter().map(|m| m.token_id.clone()).collect();
+
         Self {
             market_states,
             my_orders: Arc::new(DashMap::new()),
@@ -273,6 +280,8 @@ impl SharedState {
             usdc_balance: Arc::new(RwLock::new(Decimal::ZERO)),
             orders_placed_count: Arc::new(AtomicU64::new(0)),
             orders_cancelled_count: Arc::new(AtomicU64::new(0)),
+            ws_tokens: Arc::new(RwLock::new(ws_tokens)),
+            ws_reconnect_needed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -372,5 +381,57 @@ impl SharedState {
     pub fn both_ws_connected(&self) -> bool {
         self.market_ws_connected.load(Ordering::Acquire)
             && self.user_ws_connected.load(Ordering::Acquire)
+    }
+
+    /// Register a new market dynamically at runtime.
+    ///
+    /// Initializes all required state entries: market_states, positions,
+    /// token_to_market mapping. Safe to call even if the market already exists
+    /// (entries won't be overwritten if present).
+    pub fn register_market(
+        &self,
+        market_id: &str,
+        token_id: &str,
+        allocated_capital: Decimal,
+    ) {
+        self.market_states.entry(market_id.to_string()).or_insert(
+            MarketState {
+                market_id: market_id.to_string(),
+                midpoint: Decimal::new(50, 2),
+                best_bid: None,
+                best_ask: None,
+                spread: Decimal::ZERO,
+                last_trade_price: None,
+                updated_at: Utc::now(),
+            },
+        );
+
+        self.positions.entry(market_id.to_string()).or_insert(
+            PositionRecord {
+                market_id: market_id.to_string(),
+                yes_shares: Decimal::ZERO,
+                no_shares: Decimal::ZERO,
+                yes_value: Decimal::ZERO,
+                no_value: Decimal::ZERO,
+                allocated_capital,
+                updated_at: Utc::now(),
+            },
+        );
+
+        self.token_to_market
+            .insert(token_id.to_string(), market_id.to_string());
+    }
+
+    /// Unregister a market, removing all associated state entries.
+    ///
+    /// Note: does NOT cancel outstanding orders — caller must handle that first.
+    pub fn unregister_market(&self, market_id: &str) {
+        self.market_states.remove(market_id);
+        self.positions.remove(market_id);
+        self.price_history.remove(market_id);
+        self.settlement_times.remove(market_id);
+        self.condition_ids.remove(market_id);
+        self.token_to_market
+            .retain(|_token_id, mid| mid.as_str() != market_id);
     }
 }

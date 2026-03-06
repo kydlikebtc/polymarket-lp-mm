@@ -36,7 +36,8 @@ impl PricingEngine {
 
     /// Generate full set of ladder orders for a single market.
     ///
-    /// Returns (bid_orders, ask_orders) for all layers.
+    /// `pricing_config` is the effective config for this market instance
+    /// (profile defaults merged with per-instance overrides via StrategyRegistry).
     pub fn generate_quotes(
         &self,
         market: &MarketConfig,
@@ -47,6 +48,7 @@ impl PricingEngine {
         per_market_capital: Decimal,
         risk_level: RiskLevel,
         available_yes_shares: Decimal,
+        pricing_config: &PricingConfig,
     ) -> Vec<QuoteOrder> {
         let mut orders = Vec::new();
 
@@ -58,15 +60,15 @@ impl PricingEngine {
         };
 
         // Quote skewing: shift both bid and ask in same direction
-        let skew = self.compute_skew(iir);
+        let skew = Self::compute_skew(iir, pricing_config.skew_factor);
 
         // Track remaining sellable inventory across all layers
         let mut remaining_ask_shares = available_yes_shares;
 
-        for (i, layer) in self.config.layers.iter().enumerate() {
+        for (i, layer) in pricing_config.layers.iter().enumerate() {
             // R5-2: Include base_half_spread so there's always a minimum distance from midpoint
             // R5-15: Enforce minimum 0.1 cent effective distance to prevent zero-spread quoting
-            let effective_distance = ((self.config.base_half_spread + layer.distance) * vaf * tf * spread_mult)
+            let effective_distance = ((pricing_config.base_half_spread + layer.distance) * vaf * tf * spread_mult)
                 .max(dec!(0.005));
             // R5-7: Divide by 2 because capital is split between bid and ask sides.
             // Without this, 3 layers at 100% fraction would use 200% of per_market_capital.
@@ -139,10 +141,10 @@ impl PricingEngine {
 
     /// Compute Quote Skewing based on IIR.
     /// Positive IIR (too much YES) → negative skew (shift prices down to sell YES easier)
-    fn compute_skew(&self, iir: Decimal) -> Decimal {
+    fn compute_skew(iir: Decimal, skew_factor: Decimal) -> Decimal {
         // skew = -IIR × skew_factor
         // Negative because we want to shift prices opposite to our imbalance
-        let raw_skew = -iir * self.config.skew_factor;
+        let raw_skew = -iir * skew_factor;
 
         // Clamp to reasonable range (max 3 cents shift)
         raw_skew.max(dec!(-0.03)).min(dec!(0.03))

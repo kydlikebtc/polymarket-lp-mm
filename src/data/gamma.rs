@@ -5,13 +5,34 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use tracing::{debug, info, warn};
 
+use rust_decimal::Decimal;
+
 use polymarket_client_sdk::gamma;
-use polymarket_client_sdk::gamma::types::request::MarketsRequest;
+use polymarket_client_sdk::gamma::types::request::{MarketsRequest, SearchRequest};
 
 /// Market metadata fetched from Gamma API.
 pub struct MarketMetadata {
     pub end_date: Option<DateTime<Utc>>,
     pub condition_id: Option<B256>,
+}
+
+/// A search result from the Gamma API — one tradeable market token.
+#[derive(Debug, Clone)]
+pub struct GammaSearchResult {
+    /// Condition ID (our market_id)
+    pub condition_id: String,
+    /// YES token ID for CLOB trading
+    pub token_id: String,
+    /// Human-readable question/title
+    pub question: String,
+    /// Current best bid/ask midpoint (if available)
+    pub midpoint: Option<Decimal>,
+    /// Settlement end date
+    pub end_date: Option<DateTime<Utc>>,
+    /// Max spread for LP rewards qualification
+    pub rewards_max_spread: Option<Decimal>,
+    /// Min order size for LP rewards
+    pub rewards_min_size: Option<Decimal>,
 }
 
 /// Gamma API client for market metadata (end dates, settlement info, condition IDs).
@@ -100,6 +121,78 @@ impl GammaClient {
             conditions.len(), markets.len(),
         );
         (times, conditions)
+    }
+
+    /// Search for active markets by text query via the Gamma public-search API.
+    ///
+    /// Returns up to `limit` results, filtering for active (non-closed) markets
+    /// that have CLOB token IDs and valid condition IDs for trading.
+    pub async fn search_markets(&self, query: &str, limit: i32) -> Result<Vec<GammaSearchResult>> {
+        let request = SearchRequest::builder()
+            .q(query)
+            .limit_per_type(limit)
+            .build();
+
+        let search_results = self.client.search(&request).await
+            .context("Gamma search API request failed")?;
+
+        let mut results = Vec::new();
+
+        let Some(events) = search_results.events else {
+            debug!("Search returned no events for query '{query}'");
+            return Ok(results);
+        };
+
+        for event in &events {
+            let Some(markets) = &event.markets else {
+                continue;
+            };
+
+            for market in markets {
+                // Skip closed/inactive markets
+                if market.closed.unwrap_or(false) || !market.active.unwrap_or(true) {
+                    continue;
+                }
+
+                // Must have a condition_id (= our market_id)
+                let Some(condition_id) = &market.condition_id else {
+                    continue;
+                };
+
+                // Must have CLOB token IDs for trading
+                let Some(clob_token_ids) = &market.clob_token_ids else {
+                    continue;
+                };
+                let Some(first_token) = clob_token_ids.first() else {
+                    continue;
+                };
+
+                // Calculate midpoint from outcome_prices if available
+                let midpoint = market.outcome_prices.as_ref().and_then(|prices| {
+                    prices.first().copied()
+                });
+
+                let question = market.question.clone().unwrap_or_else(|| {
+                    event.title.clone().unwrap_or_else(|| "Unknown".to_string())
+                });
+
+                results.push(GammaSearchResult {
+                    condition_id: format!("{condition_id:#x}"),
+                    token_id: first_token.to_string(),
+                    question,
+                    midpoint,
+                    end_date: market.end_date,
+                    rewards_max_spread: market.rewards_max_spread,
+                    rewards_min_size: market.rewards_min_size,
+                });
+            }
+        }
+
+        info!(
+            "Search '{}': found {} tradeable markets from {} events",
+            query, results.len(), events.len()
+        );
+        Ok(results)
     }
 }
 

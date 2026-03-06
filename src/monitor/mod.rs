@@ -19,6 +19,7 @@ use crate::execution::OrderExecutor;
 use crate::position::{PositionAction, PositionManager};
 use crate::pricing::PricingEngine;
 use crate::risk::{RiskController, RiskLevel};
+use crate::strategy::SharedRegistry;
 
 use self::strategy::{evaluate_risk, run_market_strategy};
 
@@ -43,6 +44,7 @@ pub async fn run_orchestrator(
     pricing_engine: PricingEngine,
     mut position_manager: PositionManager,
     ctf_merger: Option<CtfMerger>,
+    strategy_registry: SharedRegistry,
     #[cfg(feature = "tui")] tui_channels: Option<TuiChannels>,
 ) -> Result<()> {
     {
@@ -275,17 +277,30 @@ pub async fn run_orchestrator(
                         continue;
                     }
                     _ => {
-                        // L1 or L2: run strategy for each market
-                        for market in &config.markets {
+                        // L1 or L2: run strategy for each active market instance.
+                        // Clone active instances upfront to release the read lock before async HTTP calls.
+                        let active_markets = {
+                            let registry = strategy_registry.read().await;
+                            registry.active_instances()
+                                .iter()
+                                .map(|i| {
+                                    let effective = registry.effective_pricing(i);
+                                    (i.market.clone(), i.capital_allocation, effective)
+                                })
+                                .collect::<Vec<_>>()
+                        };
+
+                        for (market, capital, effective_pricing) in &active_markets {
                             if let Err(e) = run_market_strategy(
                                 &market.market_id,
-                                &config,
+                                market,
+                                effective_pricing,
                                 &state,
                                 &pricing_engine,
                                 &mut executor,
                                 &risk_controller,
                                 risk_level,
-                                per_market_capital,
+                                *capital,
                                 &mut last_quote_midpoints,
                                 &mut last_quote_times,
                             ).await {
@@ -398,6 +413,7 @@ pub async fn run_orchestrator(
                 if let Some(ref tx) = tui_snapshot_tx {
                     let snap = crate::tui::snapshot::collect_snapshot(
                         &config, &state, &risk_controller, &pricing_engine,
+                        &strategy_registry,
                     ).await;
                     let _ = tx.try_send(snap);
                 }
@@ -432,6 +448,152 @@ pub async fn run_orchestrator(
                             warn!("TUI requested manual L3 recovery");
                             let mut rc = risk_controller.lock().await;
                             rc.manual_recover();
+                        }
+                        crate::tui::app::TuiCommand::ToggleMarket { market_id } => {
+                            let mut registry = strategy_registry.write().await;
+                            if let Some(enabled) = registry.toggle_market(&market_id) {
+                                if !enabled {
+                                    // Market disabled: cancel its orders
+                                    drop(registry); // Release write lock before HTTP
+                                    if let Err(e) = executor.cancel_market_orders(
+                                        &state, &market_id, &risk_controller,
+                                    ).await {
+                                        error!("Failed to cancel orders for disabled market={market_id}: {e:#}");
+                                    }
+                                }
+                            }
+                        }
+                        crate::tui::app::TuiCommand::UpdateStrategy {
+                            market_id,
+                            profile_name,
+                            overrides,
+                            capital,
+                        } => {
+                            let profile_log = profile_name.clone();
+                            let mut registry = strategy_registry.write().await;
+                            if let Err(e) = registry.update_strategy(
+                                &market_id,
+                                profile_name,
+                                overrides,
+                                capital,
+                            ) {
+                                error!("Failed to update strategy for market={market_id}: {e:#}");
+                            } else {
+                                info!(
+                                    "Strategy updated for market={market_id}: profile={:?}",
+                                    profile_log
+                                );
+                            }
+                        }
+                        crate::tui::app::TuiCommand::AddMarket {
+                            market,
+                            profile_name,
+                            capital,
+                        } => {
+                            info!(
+                                "Adding market: name={}, id={}, profile={profile_name}, capital=${capital}",
+                                market.name, market.market_id
+                            );
+                            // 1. Validate in registry FIRST (before mutating state)
+                            //    This prevents inconsistent state if add_market fails
+                            //    (e.g., duplicate market, invalid profile, limit exceeded).
+                            {
+                                let mut registry = strategy_registry.write().await;
+                                if let Err(e) = registry.add_market(market.clone(), profile_name, capital) {
+                                    error!("Failed to add market to registry: {e:#}");
+                                    continue; // Skip state mutation on failure
+                                }
+                            }
+                            // 2. Register state entries (safe: registry succeeded)
+                            state.register_market(&market.market_id, &market.token_id, capital);
+                            // 3. Add to WS token list and signal reconnect
+                            {
+                                let mut tokens = state.ws_tokens.write().await;
+                                if !tokens.contains(&market.token_id) {
+                                    tokens.push(market.token_id.clone());
+                                }
+                            }
+                            state.ws_reconnect_needed.store(true, std::sync::atomic::Ordering::Release);
+                            // 4. Fetch metadata (settlement time, condition_id) for the new market
+                            let pairs = vec![(market.market_id.clone(), market.token_id.clone())];
+                            let (s_map, c_map) = gamma_client.fetch_all_metadata(&pairs).await;
+                            for (mid, end_date) in &s_map {
+                                state.settlement_times.insert(mid.clone(), *end_date);
+                            }
+                            for (mid, cid) in &c_map {
+                                state.condition_ids.insert(mid.clone(), *cid);
+                            }
+                            info!("Market {} added successfully", market.name);
+                        }
+                        crate::tui::app::TuiCommand::RemoveMarket { market_id } => {
+                            info!("Removing market: id={market_id}");
+                            // 1. Cancel all orders for this market first
+                            if let Err(e) = executor.cancel_market_orders(
+                                &state, &market_id, &risk_controller,
+                            ).await {
+                                error!("Failed to cancel orders for removed market={market_id}: {e:#}");
+                            }
+                            // 2. Remove from strategy registry
+                            {
+                                let mut registry = strategy_registry.write().await;
+                                registry.remove_market(&market_id);
+                            }
+                            // 3. Remove state entries
+                            state.unregister_market(&market_id);
+                            // 4. Update WS token list (remove token_id if no longer needed)
+                            // The token_to_market has already been cleaned by unregister_market
+                            {
+                                let current_tokens: Vec<String> = state.token_to_market
+                                    .iter()
+                                    .map(|entry| entry.key().clone())
+                                    .collect();
+                                let mut tokens = state.ws_tokens.write().await;
+                                tokens.retain(|t| current_tokens.contains(t));
+                            }
+                            state.ws_reconnect_needed.store(true, std::sync::atomic::Ordering::Release);
+                            info!("Market {market_id} removed successfully");
+                        }
+                        crate::tui::app::TuiCommand::SearchMarkets { query } => {
+                            info!("Searching markets for query: '{query}'");
+                            match gamma_client.search_markets(&query, 10).await {
+                                Ok(results) => {
+                                    let items: Vec<crate::tui::app::SearchResultItem> = results
+                                        .into_iter()
+                                        .map(|r| crate::tui::app::SearchResultItem {
+                                            condition_id: r.condition_id,
+                                            token_id: r.token_id,
+                                            question: r.question,
+                                            midpoint: r.midpoint,
+                                            rewards_max_spread: r.rewards_max_spread,
+                                            rewards_min_size: r.rewards_min_size,
+                                        })
+                                        .collect();
+                                    info!("Search returned {} results for '{query}'", items.len());
+                                    // Send results back to TUI via snapshot
+                                    #[cfg(feature = "tui")]
+                                    if let Some(ref tx) = tui_snapshot_tx {
+                                        let mut snap = crate::tui::snapshot::collect_snapshot(
+                                            &config, &state, &risk_controller,
+                                            &pricing_engine, &strategy_registry,
+                                        ).await;
+                                        snap.search_results = Some(items);
+                                        let _ = tx.try_send(snap);
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Market search failed for '{query}': {e:#}");
+                                    // Send empty results to clear TUI "Searching..." state
+                                    #[cfg(feature = "tui")]
+                                    if let Some(ref tx) = tui_snapshot_tx {
+                                        let mut snap = crate::tui::snapshot::collect_snapshot(
+                                            &config, &state, &risk_controller,
+                                            &pricing_engine, &strategy_registry,
+                                        ).await;
+                                        snap.search_results = Some(Vec::new());
+                                        let _ = tx.try_send(snap);
+                                    }
+                                }
+                            }
                         }
                     }
                 }

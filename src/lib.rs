@@ -5,5 +5,6 @@ pub mod monitor;
 pub mod position;
 pub mod pricing;
 pub mod risk;
+pub mod strategy;
 #[cfg(feature = "tui")]
 pub mod tui;
