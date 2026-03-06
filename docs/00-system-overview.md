@@ -93,8 +93,11 @@ Polymarket 只维护一个订单簿（YES 代币的订单簿），
 │                    监控 / 告警层                          │
 │  PnL 实时追踪  │  奖励统计  │  异常告警  │  日志记录     │
 ├─────────────────────────────────────────────────────────┤
+│               策略管理层 (StrategyRegistry)               │
+│  Profile 管理  │  Instance 路由  │  动态市场增删          │
+├─────────────────────────────────────────────────────────┤
 │                    策略层（核心大脑）                      │
-│  市场筛选器  │  定价引擎  │  持仓管理器  │  风控模块      │
+│  定价引擎  │  持仓管理器  │  风控模块                     │
 ├─────────────────────────────────────────────────────────┤
 │                    执行层                                │
 │  订单管理器  │  批量处理器  │  Merge 处理器  │  重试机制  │
@@ -114,6 +117,7 @@ Polymarket 只维护一个订单簿（YES 代币的订单簿），
 | [04-position-management.md](./04-position-management.md) | 持仓管理：IIR、Quote Skewing、Merge |
 | [05-risk-control.md](./05-risk-control.md) | 三级风控体系：L1/L2/L3 状态机 |
 | [06-execution-layer.md](./06-execution-layer.md) | 执行层：订单生命周期、链上操作 |
+| [08-dynamic-strategy.md](./08-dynamic-strategy.md) | 动态策略管理：Profile、Instance、运行时市场管理 |
 
 ---
 

@@ -109,7 +109,7 @@ RUST_LOG=polymarket_mm=debug cargo run --release
 ### 5. 运行测试
 
 ```bash
-cargo test           # 运行全部 75 个测试
+cargo test           # 运行全部 93 个测试
 cargo test -- -q     # 静默模式
 ```
 
@@ -174,20 +174,65 @@ l3_daily_loss_pct    = 0.06 # 日亏损 6% 触发 L3 紧急停止
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-**4 个 Tab**：Overview（战情室）/ Orders（订单明细）/ Risk（风控状态）/ Charts（价格图表）
+**5 个 Tab**：Overview（战情室）/ Orders（订单明细）/ Risk（风控状态）/ Charts（价格图表）/ Strategy（策略管理）
 
 **键盘操作**：
 
-| 按键 | 作用 |
-|------|------|
-| `1-4` / `Tab` | 切换面板 |
-| `j/k` / `↑↓` | 滚动订单列表 |
-| `f` | 切换订单筛选（全部/活跃） |
-| `r` | 手动 L3 恢复 |
-| `←→` | 切换图表市场 |
-| `q` / `Ctrl+C` | 退出 |
+| 按键 | 作用 | Tab |
+| ------ | ------ | ----- |
+| `1-5` / `Tab` | 切换面板 | 全局 |
+| `j/k` / `↑↓` | 滚动列表 | 全局 |
+| `f` | 切换订单筛选（全部/活跃） | Orders |
+| `r` | 手动 L3 恢复 | 全局 |
+| `←→` | 切换图表市场 | Charts |
+| `e` | 启用/禁用选中市场策略 | Strategy |
+| `a` | 搜索并添加新市场 | Strategy |
+| `d` | 删除选中市场（需确认） | Strategy |
+| `Enter` | 编辑策略参数（价差/资金等） | Strategy |
+| `p` | 切换策略 Profile | Strategy |
+| `Esc` | 关闭弹窗 | 弹窗内 |
+| `q` / `Ctrl+C` | 退出 | 全局 |
 
 > TUI 模式下，tracing 日志自动重定向到 `bot.log`，不干扰终端显示。
+
+---
+
+## 动态策略管理
+
+系统支持运行时动态管理市场和策略，无需重启：
+
+### 核心概念
+
+- **StrategyRegistry** — 运行时可变的策略注册中心（`Arc<RwLock<T>>`），管理所有策略实例
+- **StrategyProfile** — 命名的策略配置模板（如 "conservative"、"balanced"、"aggressive"）
+- **StrategyInstance** — 绑定到具体市场的策略实例，包含启用状态、资金分配、参数覆盖
+- **PricingOverrides** — 覆盖 Profile 默认值的个性化参数
+
+### 运行时操作
+
+| 操作 | 快捷键 | 说明 |
+| ------ | ------ | ------ |
+| 启用/禁用市场 | `e` | 一键暂停或恢复某个市场的策略执行 |
+| 添加新市场 | `a` | 搜索 Gamma API 市场列表，选择后自动注册并订阅 WS |
+| 删除市场 | `d` | 从策略列表中移除市场（需确认） |
+| 编辑参数 | `Enter` | 修改 base_half_spread、skew_factor、资金分配等 |
+| 切换 Profile | `p` | 在不同策略模板间切换（参数即时生效） |
+
+### 多策略并行
+
+不同市场可使用不同的策略 Profile，各自独立运行：
+
+```
+市场 A (Trump 2028)   → Profile: aggressive  → 窄价差、高资金
+市场 B (Fed Rate Cut) → Profile: conservative → 宽价差、低资金
+市场 C (ETH Price)    → Profile: balanced     → 中等配置
+```
+
+每个市场的参数还可在 Profile 基础上进一步微调（PricingOverrides），覆盖 `base_half_spread`、`skew_factor`、`layers` 等。
+
+### 动态 WS 订阅
+
+添加新市场时，系统自动将新 token 加入 WS 订阅列表并触发重连，无需手动管理连接。
 
 ---
 
@@ -202,10 +247,11 @@ polymarket-lp-mm/
 │   ├── data/
 │   │   ├── mod.rs           # SharedState 共享状态（DashMap + RwLock）
 │   │   ├── rest.rs          # CLOB REST API 客户端
-│   │   ├── ws.rs            # WebSocket 实时行情/用户事件
-│   │   ├── gamma.rs         # Gamma API（结算时间、市场元数据）
-│   │   ├── state.rs         # 状态管理辅助
+│   │   ├── ws.rs            # WebSocket 实时行情/用户事件（动态订阅）
+│   │   ├── gamma.rs         # Gamma API（结算时间、市场搜索）
+│   │   ├── state.rs         # 状态管理：register/unregister 市场
 │   │   └── ctf.rs           # CTF 链上 Merge 操作
+│   ├── strategy/mod.rs      # 策略注册中心：Profile + Instance + Overrides
 │   ├── pricing/mod.rs       # 定价引擎：VAF/IIF/TF 三因子 + 阶梯挂单
 │   ├── position/mod.rs      # 持仓管理：IIR 计算、Skewing、Merge 决策
 │   ├── risk/mod.rs          # 三级风控状态机（L1→L2→L3）
@@ -215,13 +261,20 @@ polymarket-lp-mm/
 │   │   └── strategy.rs      # 策略逻辑：报价生成、风控联动
 │   └── tui/                 # TUI 仪表盘（feature-gated）
 │       ├── mod.rs           # TUI 入口 + 终端管理
-│       ├── app.rs           # 应用状态 + 键盘处理
+│       ├── app.rs           # 应用状态 + Modal 弹窗 + 键盘路由
 │       ├── event.rs         # 事件循环（crossterm + tick + snapshot）
 │       ├── snapshot.rs      # DashboardSnapshot 只读快照
-│       ├── ui.rs            # 顶层渲染调度
-│       └── tabs/            # 4 个 Tab 渲染模块
-├── tests/                   # 75 个单元/集成测试
-├── configs/                 # 预设策略模板
+│       ├── input.rs         # TextInput 文本输入控件
+│       ├── modal.rs         # Modal 弹窗渲染框架
+│       ├── ui.rs            # 顶层渲染调度 + Modal overlay
+│       └── tabs/            # 5 个 Tab 渲染模块
+│           ├── overview.rs  # 战情室（市场总览 + 启用状态）
+│           ├── orders.rs    # 订单明细
+│           ├── risk.rs      # 风控状态
+│           ├── charts.rs    # 价格图表
+│           └── strategy.rs  # 策略管理（市场列表 + 参数编辑）
+├── tests/                   # 93 个单元/集成测试
+├── configs/                 # 预设策略模板（可作为 Profile 加载）
 ├── docs/                    # 设计文档
 ├── .env.example             # API 密钥模板
 └── config.example.toml      # 配置文件模板
@@ -313,7 +366,7 @@ L3（紧急）→ 全部撤单，必须人工确认恢复（TUI 按 r 键）
 ## 文档目录
 
 | 文档 | 内容 |
-|------|------|
+| ------ | ------ |
 | [00-system-overview](./docs/00-system-overview.md) | 系统架构、数据流、启动顺序 |
 | [01-data-layer](./docs/01-data-layer.md) | WebSocket、REST、断线重连、状态缓存 |
 | [02-qscore-rewards](./docs/02-qscore-rewards.md) | Q-Score 公式、二次衰减、激励密度 |
@@ -322,6 +375,7 @@ L3（紧急）→ 全部撤单，必须人工确认恢复（TUI 按 r 键）
 | [05-risk-control](./docs/05-risk-control.md) | L1/L2/L3 状态机、Ghost Fills 检测 |
 | [06-execution-layer](./docs/06-execution-layer.md) | 订单生命周期、EIP-712、批量操作 |
 | [07-ops-monitoring](./docs/07-ops-monitoring.md) | 运维监控、告警、日志分析 |
+| [08-dynamic-strategy](./docs/08-dynamic-strategy.md) | 动态策略管理、多 Profile、运行时市场管理 |
 
 ---
 

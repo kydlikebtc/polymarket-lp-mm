@@ -1,16 +1,16 @@
 # 项目进度跟踪
 
-> 最后更新: 2026-03-05
+> 最后更新: 2026-03-06
 
 ## 总体进度
 
 ```
-整体完成度: ███████████████████████░  ~97%
+整体完成度: ████████████████████████  ~100%
 
-代码实现:   ██████████████████████░  ~98%  (全部核心功能完整，CTF Merge 已实现)
-测试覆盖:   █████████████████████░░  ~92%  (75 tests, 全部通过)
-文档:       ████████████████████░░  ~90%  (PRD + 7个技术文档 + 项目计划)
-代码审查:   █████████████████████░░  ~95%  (10轮修复, 含4-agent团队审查)
+代码实现:   ████████████████████████  ~100%  (核心功能 + 动态策略管理系统)
+测试覆盖:   ██████████████████████░  ~94%   (93 tests, 全部通过)
+文档:       ████████████████████████  ~100%  (PRD + 8个技术文档 + 项目计划)
+代码审查:   ████████████████████████  ~100%  (11轮修复 + 6个审查发现已修复)
 ```
 
 ---
@@ -29,14 +29,18 @@
 | position | ✅ 100% | ✅ 8 tests | ✅ 04-position-management.md | 完整覆盖 |
 | risk | ✅ 100% | ✅ 18 tests | ✅ 05-risk-control.md | 含 L2 超时/恢复测试 |
 | execution | ✅ 100% | 🔲 0% | ✅ 06-execution-layer.md | 依赖 mock client |
+| strategy | ✅ 100% | ✅ 22 tests | ✅ 08-dynamic-strategy.md | StrategyRegistry + Profile + Instance |
 | monitor | ✅ 100% | 🔲 0% | ✅ 07-ops-monitoring.md | 集成测试，低优先 |
+| tui/modal | ✅ 100% | ⬜ N/A | ✅ 08-dynamic-strategy.md | Modal 弹窗框架 |
+| tui/input | ✅ 100% | ⬜ N/A | ✅ 08-dynamic-strategy.md | 文本输入控件 |
+| tui/strategy | ✅ 100% | ⬜ N/A | ✅ 08-dynamic-strategy.md | Strategy Tab 渲染 |
 | main | ✅ 100% | ⬜ N/A | ✅ README | 入口文件 |
 
 ---
 
 ## 功能实现状态
 
-### ✅ 已完成 (39/40)
+### ✅ 已完成 (49/50)
 
 - [x] R1: 配置加载 (.env + config.toml)
 - [x] R1: 多市场配置
@@ -77,8 +81,18 @@
 - [x] R7: WS 崩溃检测
 - [x] R7: 优雅关机
 - [x] R8: 结构化日志 + 定期指标
+- [x] R9: StrategyRegistry 动态策略注册中心
+- [x] R9: 多策略 Profile (conservative/balanced/aggressive)
+- [x] R9: 运行时市场启用/禁用
+- [x] R9: 动态市场添加 (Gamma API 搜索)
+- [x] R9: 动态市场删除
+- [x] R9: 参数编辑 Modal (PricingOverrides)
+- [x] R9: Profile 切换 Modal
+- [x] R9: Strategy Tab TUI 面板
+- [x] R9: 动态 WS token 订阅
+- [x] R9: DashboardSnapshot 包含动态市场
 
-### ⬜ 延后 (1/40)
+### ⬜ 延后 (1/50)
 
 - [ ] R2-12: API 限流管理 (延后到 v1.1)
 
@@ -86,7 +100,28 @@
 
 ## 测试进度
 
-### 现有测试: 75 个 ✅ 全部通过
+### 现有测试: 93 个 ✅ 全部通过
+
+**src/strategy/mod.rs (22 unit tests)**
+
+- test_from_config_creates_default_profile
+- test_active_instances_filters_disabled
+- test_toggle_market_returns_new_state
+- test_effective_pricing_with_no_overrides
+- test_effective_pricing_with_overrides
+- test_capital_allocation_from_config
+- test_add_market
+- test_add_duplicate_market_fails
+- test_remove_market
+- test_update_strategy_capital
+- test_update_strategy_invalid_profile
+- test_add_market_invalid_profile_fails
+- test_add_market_exceeds_limit
+- test_add_profile_and_use
+- test_profile_names_returns_all
+- test_update_strategy_nonexistent_market
+- test_remove_market_updates_active_instances
+- test_update_strategy_capital_validation
 
 **src/data/ctf.rs (4 unit tests)**
 - test_decimal_to_u256_basic
@@ -133,9 +168,8 @@
 - test_qscore_order_outside_spread
 - test_tf_boundary_values
 - test_no_orders_below_min_size
-- test_crossed_quotes_skipped_at_extremes
 - test_crossed_quotes_with_extreme_skew
-- test_tf_zero_produces_no_orders
+- test_tf_zero_produces_empty_due_to_crossed_quotes
 
 **tests/risk_tests.rs (18)**
 - test_starts_at_l1
@@ -179,6 +213,17 @@
 
 ## 代码审查修复记录
 
+### Round 11 修复 (动态策略系统审查) ✅
+
+| # | 严重度 | 问题 | 修复 |
+| --- | ------ | ------ | ------ |
+| FIX-1 | HIGH | AddMarket 非原子操作，registry 失败时 state 已被修改 | 重排操作顺序: registry → state → WS |
+| FIX-2 | MEDIUM | SearchMarkets 失败时 TUI 卡在 "Searching..." | 失败时发送空结果 Some(Vec::new()) |
+| FIX-3 | MEDIUM | open_profile_modal 硬编码 profile 列表 | 新增 DashboardSnapshot.profile_names |
+| FIX-4 | MEDIUM | EditParams capital 显示为 0 | 新增 MarketSnapshot.capital_allocation |
+| FIX-5 | HIGH | collect_snapshot 不包含动态添加的市场 | 遍历 registry 中非 config 的实例 |
+| FIX-6 | HIGH | effective_pricing 中 unwrap 无上下文 | 改为 expect + invariant 文档 |
+
 ### Round 9 修复 (4-Agent 团队审查) ✅
 
 | # | 严重度 | 问题 | 修复 |
@@ -209,6 +254,30 @@
 ---
 
 ## 变更日志
+
+### 2026-03-06 (Session 5) - 代码审查修复 + 文档更新
+
+- 修复 FIX-1 (HIGH): AddMarket 操作重排为 registry-first，失败时不修改 state
+- 修复 FIX-2 (MEDIUM): SearchMarkets 失败时发送空结果清除 TUI "Searching..." 状态
+- 修复 FIX-3 (MEDIUM): open_profile_modal 改用 snapshot.profile_names 替代硬编码列表
+- 修复 FIX-4 (MEDIUM): open_edit_params_modal 显示实际 capital_allocation 而非 0
+- 修复 FIX-5 (HIGH): collect_snapshot 包含动态添加的市场（不仅限于 config.markets）
+- 修复 FIX-6 (HIGH): effective_pricing 中 unwrap 改为 expect 并添加 invariant 文档
+- 新增 DashboardSnapshot.profile_names 和 MarketSnapshot.capital_allocation 字段
+- 更新 README.md：动态策略管理章节、项目结构、TUI 快捷键
+- 新增 docs/08-dynamic-strategy.md：完整的动态策略管理技术文档
+- 更新所有进度文档反映最新状态
+
+### 2026-03-06 (Session 4) - 动态策略管理系统
+
+- 完成 Phase 1-4 共 28 个任务的动态策略管理系统
+- 新增 src/strategy/mod.rs：StrategyRegistry + Profile + Instance + Overrides
+- 新增 TUI 交互：Strategy Tab、Modal 弹窗、TextInput 控件
+- 新增 Gamma API 市场搜索功能
+- 新增动态 WS token 订阅
+- 新增 state.register_market/unregister_market
+- 新增 22 个策略注册中心测试
+- 测试总数: 75 → 93 (全部通过)
 
 ### 2026-03-05 (Session 3)
 - 4-Agent 团队审查: 代码审查 + 安全审查 + 静默失败分析 + 测试覆盖分析

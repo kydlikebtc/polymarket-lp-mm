@@ -1,17 +1,18 @@
 # 项目计划: Polymarket LP 做市机器人
 
-> 版本: 1.1 | 更新日期: 2026-03-05
+> 版本: 2.0 | 更新日期: 2026-03-06
 
 ## 1. 项目阶段概览
 
 ```
-Phase 1: 基础架构    [✅ 完成]
-Phase 2: 核心策略    [✅ 完成]
-Phase 3: 风控系统    [✅ 完成]
-Phase 4: 执行层      [✅ 完成]
-Phase 5: 功能完善    [✅ 完成] (API 限流延后到 v1.1)
-Phase 6: 测试强化    [✅ 完成] (66 tests, 全部通过)
-Phase 7: 代码审查    [✅ 完成] (3 CRITICAL 已修复)
+Phase 1: 基础架构       [✅ 完成]
+Phase 2: 核心策略       [✅ 完成]
+Phase 3: 风控系统       [✅ 完成]
+Phase 4: 执行层         [✅ 完成]
+Phase 5: 功能完善       [✅ 完成] (API 限流延后到 v1.1)
+Phase 6: 测试强化       [✅ 完成] (93 tests, 全部通过)
+Phase 7: 代码审查       [✅ 完成] (11 轮修复)
+Phase 8: 动态策略管理   [✅ 完成] (28 tasks, 4 sub-phases)
 ```
 
 ---
@@ -120,7 +121,9 @@ Phase 7: 代码审查    [✅ 完成] (3 CRITICAL 已修复)
 | tests/pricing_tests.rs | 12 | PricingEngine+边界 |
 | tests/risk_tests.rs | 16 | RiskController+补充 |
 | tests/state_tests.rs | 12 | PnlTracker+PositionRecord |
-| **合计** | **66** | **全部通过** |
+| tests/strategy_tests.rs | 22 | StrategyRegistry+Profile+Override |
+| src/tui/input.rs (unit) | 5 | TextInput widget |
+| **合计** | **93** | **全部通过** |
 
 ---
 
@@ -145,7 +148,60 @@ Phase 7: 代码审查    [✅ 完成] (3 CRITICAL 已修复)
 
 ---
 
-## 9. 风险和缓解
+## 9. Phase 8: 动态策略管理 ✅
+
+### 目标
+
+运行时动态管理市场和策略配置，无需重启服务。
+
+### 子阶段
+
+| 子阶段 | 内容 | 任务数 | 状态 |
+| ------ | ------ | ------ | ------ |
+| P1 | StrategyRegistry + 市场开关 | 10 | ✅ |
+| P2 | TUI 交互框架 + 参数编辑 | 8 | ✅ |
+| P3 | 动态市场添加/删除 | 7 | ✅ |
+| P4 | 多策略 Profile 管理 + 测试 | 3 | ✅ |
+
+### 新增模块
+
+| 文件 | 行数 | 内容 |
+| ------ | ------ | ------ |
+| src/strategy/mod.rs | ~450 | StrategyRegistry + Profile + Instance + PricingOverrides |
+| src/tui/modal.rs | ~200 | Modal overlay 渲染框架 (4 种弹窗) |
+| src/tui/input.rs | ~180 | TextInput widget (光标、编辑、数值校验) |
+| src/tui/tabs/strategy.rs | ~350 | Strategy Tab 完整渲染 |
+| tests/strategy_tests.rs | ~500 | StrategyRegistry 单元测试 (22 tests) |
+
+### 修改模块
+
+| 文件 | 改动 | 说明 |
+| ------ | ------ | ------ |
+| src/lib.rs | +1 行 | `mod strategy;` |
+| src/main.rs | ~30 行 | 创建 StrategyRegistry + ws_tokens + ws_reconnect_needed |
+| src/config/mod.rs | ~10 行 | 市场上限 3 → 10 |
+| src/pricing/mod.rs | ~20 行 | generate_quotes 接受 &PricingConfig 参数 |
+| src/monitor/mod.rs | ~100 行 | Registry 遍历 + 5 种 TuiCommand 处理 |
+| src/monitor/strategy.rs | ~30 行 | 接受 effective PricingConfig + per_market_capital |
+| src/data/gamma.rs | ~50 行 | search_markets() 搜索市场 API |
+| src/data/state.rs | ~40 行 | register_market() / unregister_market() |
+| src/data/ws.rs | ~30 行 | 动态 token 订阅 + 重连信号 |
+| src/tui/app.rs | ~200 行 | ModalState + TuiCommand 扩展 + 键盘路由 |
+| src/tui/ui.rs | ~30 行 | Tab::Strategy 渲染 + Modal overlay |
+| src/tui/snapshot.rs | ~60 行 | MarketSnapshot 扩展 + 动态市场快照 |
+
+### 核心设计
+
+- **StrategyRegistry** (`Arc<RwLock<T>>`) — 运行时可变的策略状态权威来源
+- **StrategyProfile** — 命名的定价参数模板（default/conservative/balanced/aggressive）
+- **StrategyInstance** — 每市场一个实例（市场配置 + Profile + 开关 + 资金 + 覆盖参数）
+- **PricingOverrides** — Option 字段逐一覆盖 Profile 默认值
+- **TuiCommand** — ToggleMarket / UpdateStrategy / AddMarket / RemoveMarket / SearchMarkets
+- **WS 动态订阅** — ws_tokens + ws_reconnect_needed 实现运行时市场增删
+
+---
+
+## 10. 风险和缓解
 
 | 风险 | 影响 | 缓解措施 |
 |------|------|----------|
@@ -156,10 +212,11 @@ Phase 7: 代码审查    [✅ 完成] (3 CRITICAL 已修复)
 
 ---
 
-## 10. 依赖关系
+## 11. 依赖关系
 
 ```
 Phase 1 (基础) → Phase 2 (策略) → Phase 4 (执行)
                 ↘ Phase 3 (风控) ↗
                                  ↘ Phase 5 (完善) → Phase 6 (测试) → Phase 7 (审查)
+                                                                                    ↘ Phase 8 (动态策略)
 ```

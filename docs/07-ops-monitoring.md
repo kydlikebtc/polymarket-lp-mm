@@ -216,14 +216,12 @@ executor.cancel_all_orders()  ← 取消所有活跃订单
 
 ### 8.1 手动 L3 恢复
 
-当系统进入 L3 紧急状态后，只能通过手动干预恢复：
+当系统进入 L3 紧急状态后，通过 TUI 手动恢复：
 
 1. 确认触发原因（查看日志中的 `RISK LEVEL: → L3-Emergency | Trigger:` 行）
 2. 评估市场状况是否已恢复正常
-3. 通过代码调用 `risk_controller.manual_recover()` 恢复到 L1
+3. 在 TUI 中按 `r` 键发送 `TuiCommand::RecoverL3`
 4. 系统将在下一个策略循环 (10s) 自动恢复做市
-
-> MVP 阶段需要重启进程来恢复。未来可通过 HTTP API 端点实现运行时恢复。
 
 ### 8.2 紧急停机
 
@@ -259,12 +257,55 @@ grep "WS" bot.log | grep -E "error|disconnect|reconnect"
 
 ---
 
-## 9. 已知限制
+## 9. TUI 策略管理操作
+
+### 9.1 Strategy Tab
+
+通过按 `5` 切换到 Strategy Tab，可在运行时管理市场和策略：
+
+| 操作 | 快捷键 | 说明 |
+| ------ | ------ | ------ |
+| 启用/禁用市场 | `e` | 切换选中市场的策略执行开关 |
+| 添加市场 | `a` | 打开搜索 Modal，通过 Gamma API 搜索并添加新市场 |
+| 删除市场 | `d` | 确认后移除市场（取消挂单 + 清理状态 + WS 退订） |
+| 编辑参数 | `Enter` | 编辑 base_half_spread / skew_factor / capital |
+| 切换 Profile | `p` | 从可用 Profile 列表中选择策略模板 |
+| 上下导航 | `j` / `k` | 在市场列表中移动选中项 |
+
+### 9.2 Modal 弹窗系统
+
+| Modal | 触发 | 功能 |
+| ------ | ------ | ------ |
+| SearchMarket | `a` 键 | 搜索关键词 → Gamma API 查询 → 选择市场添加 |
+| EditParams | `Enter` 键 | 编辑定价参数和资金分配 |
+| SelectProfile | `p` 键 | 从 default/conservative/balanced/aggressive 中选择 |
+| Confirm | `d` 键 | 删除市场前的确认弹窗 |
+
+所有 Modal 按 `Esc` 取消，按 `Enter` 确认。Modal 激活时会捕获所有键盘输入。
+
+### 9.3 动态市场管理
+
+添加新市场时，系统自动执行：
+
+1. StrategyRegistry 添加实例（验证无重复、未超限）
+2. SharedState 注册市场状态（market_states / positions / token_to_market）
+3. WS 动态订阅（添加 token → 触发重连）
+4. 异步获取结算时间
+
+删除市场时，系统自动执行：
+
+1. StrategyRegistry 移除实例
+2. SharedState 清理所有状态
+3. WS 退订 token
+
+---
+
+## 10. 已知限制
 
 | 限制 | 影响 | 计划 |
 |------|------|------|
 | 无持久化存储 | 重启后丢失 PnL 历史 | 未来添加 SQLite |
 | 无 Telegram 告警 | 需要手动查看日志 | P2 延后 |
-| L3 恢复需重启 | 运维不便 | 未来添加 HTTP API |
+| L3 恢复需 TUI 操作 | 需要人工确认 | 按 'r' 键恢复 |
 | 无 API 限流追踪 | 理论上可能超限 | 未来添加滑动窗口计数 |
 | PnL 成本基础近似 | 启动时用 0.50 作为已有持仓的成本 | 文档化接受 |
